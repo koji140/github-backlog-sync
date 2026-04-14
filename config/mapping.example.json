@@ -43,13 +43,25 @@
   "assigneeMap": {
     "github-username-1": 123456,
     "github-username-2": 234567,
-    "onoda-github-username":   0,
-    "ushioda-github-username": 0
+
+    "onoda-github-username":    0,
+    "ushioda-github-username":  0,
+    "ishimaru-github-username": 0
   },
-  "_assigneeMap_note": [
-    "上記の onoda / ushioda エントリは追加手順のサンプルです。",
-    "実際の GitHub ユーザー名と Backlog ユーザー ID（0 は未設定）に書き換えてください。",
-    "0 のまま使用すると Backlog API でエラーになります。"
+  "_assigneeMap_known_members": [
+    "以下は順次 assigneeMap に追加していく既知メンバーの枠です。",
+    "GitHub username と Backlog user ID が確認でき次第、実値に書き換えてください。",
+    "  大野さん   : onoda-github-username    → 実際の GitHub ユーザー名に変更 / 値を Backlog user ID に変更",
+    "  潮田さん   : ushioda-github-username  → 実際の GitHub ユーザー名に変更 / 値を Backlog user ID に変更",
+    "  石丸さん   : ishimaru-github-username → 実際の GitHub ユーザー名に変更 / 値を Backlog user ID に変更",
+    "",
+    "確認方法:",
+    "  GitHub username : github.com/<username> のプロフィール URL から確認",
+    "  Backlog user ID : GET /api/v2/users レスポンスの id フィールドを確認",
+    "    curl 'https://<space>.backlog.com/api/v2/users?apiKey=<key>'",
+    "",
+    "注意: 値が 0 のまま mapping.json に残すと Backlog API でエラーになります。",
+    "      未確認のエントリは mapping.json から削除して warn only（警告ログのみ）で運用してください。"
   ],
 
   "_section_issueTypeId": [
