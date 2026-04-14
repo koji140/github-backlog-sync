@@ -226,3 +226,4 @@ DRY_RUN=false
 - [フィールドマッピング仕様](docs/mapping.md)
 - [セットアップ手順](docs/setup.md)
 - [同期レポート](docs/github-backlog-sync-report.md)
+- [assigneeMap 未定義ユーザーの運用ポリシー](docs/unmapped-assignee-policy.md)

@@ -267,7 +267,9 @@ GitHubを上流、Backlogを運用基盤として、
 - [ ] GitHub 側ページネーション対応（100件以上対応）
 - [ ] GitHub Actions での定期実行（Secrets 設定含む）
 - [ ] エラーハンドリング（1件失敗時の継続 or 停止制御）
-- [ ] assigneeMap 未定義ユーザーの扱い（警告 or デフォルト担当）
+- [x] assigneeMap 未定義ユーザーの扱い：運用ポリシー定義済み → [unmapped-assignee-policy.md](unmapped-assignee-policy.md)
+  - 暫定方針: warn only（警告ログのみ・Backlog 既存担当者を維持）
+  - 残作業: ①既知メンバーの assigneeMap 追加 ②warn only の完全実装（コード変更）
 
 ### 優先度：中（運用安定・改善）
 - [ ] ログの構造化（JSON出力 or 保存）
