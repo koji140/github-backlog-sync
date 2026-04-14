@@ -25,13 +25,32 @@
   "_section_assigneeMap": [
     "GitHub ユーザー名 → Backlog ユーザー ID のマッピング。",
     "Backlog ユーザー ID は GET /api/v2/users で確認できます。",
-    "マッピングにない GitHub ユーザーは担当者未設定として扱われ、ログに警告が出ます。",
-    "GitHub 側に複数担当者がいる場合は先頭 1 名だけを Backlog 担当者にマップします。"
+    "  curl 'https://<space>.backlog.com/api/v2/users?apiKey=<key>'",
+    "GitHub 側に複数担当者がいる場合は先頭 1 名だけを Backlog 担当者にマップします。",
+    "",
+    "未定義ユーザーの扱い（warn only ポリシー）:",
+    "  マッピングにない GitHub ユーザーがいても同期は継続します。",
+    "  assigneeId は送らず、Backlog 既存担当者はそのまま維持されます。",
+    "  警告ログ [Map] 担当者マッピングなし で検知できます。",
+    "  詳細: docs/unmapped-assignee-policy.md",
+    "",
+    "追加手順:",
+    "  1. GET /api/v2/users で Backlog ユーザー ID を確認する",
+    "  2. GitHub のプロフィール URL からユーザー名を確認する（例: github.com/koji140 → 'koji140'）",
+    "  3. mapping.json の assigneeMap に { \"github-username\": <BacklogUserId> } を追加する",
+    "  4. npm run dry-run で [Map] 警告が消えることを確認する"
   ],
   "assigneeMap": {
     "github-username-1": 123456,
-    "github-username-2": 234567
+    "github-username-2": 234567,
+    "onoda-github-username":   0,
+    "ushioda-github-username": 0
   },
+  "_assigneeMap_note": [
+    "上記の onoda / ushioda エントリは追加手順のサンプルです。",
+    "実際の GitHub ユーザー名と Backlog ユーザー ID（0 は未設定）に書き換えてください。",
+    "0 のまま使用すると Backlog API でエラーになります。"
+  ],
 
   "_section_issueTypeId": [
     "Backlog の課題種別 ID。GET /api/v2/projects/:projectKey/issueTypes で確認できます。",

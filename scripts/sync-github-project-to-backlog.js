@@ -44,6 +44,22 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// センチネル定数
+// ---------------------------------------------------------------------------
+
+/**
+ * assigneeMap に GitHub ユーザーが存在しなかったことを示すセンチネル値。
+ *
+ * null との区別が必要な理由:
+ *   - null   = GitHub 側に担当者がいない（意図的な未設定）→ Backlog 担当者もクリアしてよい
+ *   - ASSIGNEE_UNMAPPED = GitHub 側に担当者はいるが assigneeMap に未定義
+ *                         → warn only ポリシーにより Backlog 既存担当者を変えない
+ *
+ * warn only ポリシー詳細: docs/unmapped-assignee-policy.md
+ */
+const ASSIGNEE_UNMAPPED = Symbol('ASSIGNEE_UNMAPPED');
+
+// ---------------------------------------------------------------------------
 // 環境変数の読み込み
 // ---------------------------------------------------------------------------
 
@@ -630,7 +646,7 @@ function runDescriptionNormalizationTests() {
  * @returns {{
  *   summary: string,
  *   description: string,
- *   assigneeId: number|null,
+ *   assigneeId: number|null|typeof ASSIGNEE_UNMAPPED,
  *   issueTypeId: number|null,
  *   priorityId: number,
  *   dueDate: string|null,
@@ -639,6 +655,12 @@ function runDescriptionNormalizationTests() {
  *   githubProjectItemId: string,
  *   githubUrl: string|null,
  * }}
+ *
+ * assigneeId の値の意味:
+ *   number           = マッピング済み Backlog ユーザー ID
+ *   null             = GitHub 側に担当者なし（意図的な未設定）
+ *   ASSIGNEE_UNMAPPED = GitHub 側に担当者はいるが assigneeMap に未定義
+ *                       → buildBacklogUpdateParams() で diff 対象外になる（warn only）
  */
 function mapGitHubItemToBacklogIssue(normalizedItem, mapping) {
   // --- summary ---
@@ -649,11 +671,15 @@ function mapGitHubItemToBacklogIssue(normalizedItem, mapping) {
   let assigneeId = null;
   if (normalizedItem.assigneeLogins.length > 0) {
     const primaryLogin = normalizedItem.assigneeLogins[0];
-    assigneeId = mapping.assigneeMap?.[primaryLogin] ?? null;
-    if (assigneeId === null) {
+    const mapped = mapping.assigneeMap?.[primaryLogin];
+    if (mapped != null) {
+      assigneeId = mapped;
+    } else {
+      // warn only ポリシー: Backlog 既存担当者をクリアしないようセンチネルを返す
+      assigneeId = ASSIGNEE_UNMAPPED;
       console.warn(
         `[Map] 担当者マッピングなし: GitHub ユーザー "${primaryLogin}" は assigneeMap に存在しません。` +
-        ` Backlog 担当者は未設定になります。`
+        ` Backlog 既存担当者は変更しません（warn only）。`
       );
     }
     if (normalizedItem.assigneeLogins.length > 1) {
@@ -817,10 +843,13 @@ function buildBacklogUpdateParams(backlogIssue, payload) {
   }
 
   // assigneeId
-  const currentAssigneeId = backlogIssue.assignee?.id ?? null;
-  if (currentAssigneeId !== payload.assigneeId) {
-    // payload.assigneeId が null の場合は空文字を送って担当者をクリアする
-    params.assigneeId = payload.assigneeId;
+  // ASSIGNEE_UNMAPPED の場合は warn only ポリシーにより diff 対象外（Backlog 既存担当者を維持）
+  if (payload.assigneeId !== ASSIGNEE_UNMAPPED) {
+    const currentAssigneeId = backlogIssue.assignee?.id ?? null;
+    if (currentAssigneeId !== payload.assigneeId) {
+      // payload.assigneeId が null の場合は空文字を送って担当者をクリアする
+      params.assigneeId = payload.assigneeId;
+    }
   }
 
   // dueDate（日付部分のみ比較）
@@ -919,9 +948,12 @@ async function fetchBacklogIssues(mapping) {
  */
 async function createBacklogIssue(payload, mapping, dryRun) {
   if (dryRun) {
+    const assigneeLog = payload.assigneeId === ASSIGNEE_UNMAPPED
+      ? '未マッピング（送信しない・warn only）'
+      : (payload.assigneeId ?? '未設定');
     console.log(`  [DRY-RUN] CREATE: "${payload.summary}"`);
     console.log(`    status: ${payload.statusName ?? '未設定'}（create 時は送信しない。次回 update で同期）`);
-    console.log(`    assigneeId: ${payload.assigneeId ?? '未設定'}`);
+    console.log(`    assigneeId: ${assigneeLog}`);
     console.log(`    dueDate: ${payload.dueDate ?? '未設定'}`);
     console.log(`    githubUrl: ${payload.githubUrl ?? '(なし)'}`);
     return null;
@@ -941,7 +973,10 @@ async function createBacklogIssue(payload, mapping, dryRun) {
   //   作成直後は Backlog のデフォルト状態（未対応）になる。
   //   次回 update 時に statusId が差分として検出され、そこで初めて同期される。
   if (payload.description)         params.set('description', payload.description);
-  if (payload.assigneeId != null)  params.set('assigneeId',  String(payload.assigneeId));
+  // ASSIGNEE_UNMAPPED（未マッピング）は送らない。null（GitHub 側に担当者なし）も送らない。
+  if (payload.assigneeId != null && payload.assigneeId !== ASSIGNEE_UNMAPPED) {
+    params.set('assigneeId', String(payload.assigneeId));
+  }
   if (payload.dueDate)             params.set('dueDate',     payload.dueDate);
 
   const url = new URL(`https://${space}.backlog.com/api/v2/issues`);
