@@ -85,6 +85,11 @@ const config = {
   dryRun: process.env.DRY_RUN === 'true',
   // limit: 正の整数なら Draft 除外後の先頭 N 件のみ処理する（未指定・空は全件）
   limit: process.env.LIMIT || '',
+  // force assignee sync: FORCE_SYNC_ITEM_URL で指定した 1 件だけ assigneeId を強制再送する
+  // 通常の差分判定をスキップして assigneeId を必ず update に含める一時運用オプション。
+  // ASSIGNEE_UNMAPPED（未マッピングユーザー）は force 時も送らない。
+  forceAssigneeSync: process.env.FORCE_ASSIGNEE_SYNC === 'true',
+  forceSyncItemUrl:  process.env.FORCE_SYNC_ITEM_URL  || '',
 };
 
 // ---------------------------------------------------------------------------
@@ -109,6 +114,14 @@ function validateConfig(cfg) {
   const missingGh = requiredGh.filter(([, val]) => !val).map(([key]) => key);
   if (missingGh.length > 0) {
     throw new Error(`GitHub 環境変数が設定されていません: ${missingGh.join(', ')}`);
+  }
+
+  // FORCE_ASSIGNEE_SYNC は FORCE_SYNC_ITEM_URL とセットで使う
+  if (cfg.forceAssigneeSync && !cfg.forceSyncItemUrl) {
+    throw new Error(
+      'FORCE_ASSIGNEE_SYNC=true の場合は FORCE_SYNC_ITEM_URL も設定してください。\n' +
+      '例: FORCE_SYNC_ITEM_URL=https://github.com/users/<owner>/projects/<n>'
+    );
   }
 
   // LIMIT は空文字・未指定なら全件（有効時は正の整数のみ許容）
@@ -826,7 +839,7 @@ function normalizeDueDate(dateStr) {
  * @param {object} payload      - mapGitHubItemToBacklogIssue() の返り値
  * @returns {object|null} 変更フィールドを含むオブジェクト、変更なしなら null
  */
-function buildBacklogUpdateParams(backlogIssue, payload) {
+function buildBacklogUpdateParams(backlogIssue, payload, { forceAssignee = false } = {}) {
   const params = {};
 
   // summary
@@ -844,9 +857,10 @@ function buildBacklogUpdateParams(backlogIssue, payload) {
 
   // assigneeId
   // ASSIGNEE_UNMAPPED の場合は warn only ポリシーにより diff 対象外（Backlog 既存担当者を維持）
+  // forceAssignee=true の場合は差分判定をスキップして assigneeId を必ず params に含める
   if (payload.assigneeId !== ASSIGNEE_UNMAPPED) {
     const currentAssigneeId = backlogIssue.assignee?.id ?? null;
-    if (currentAssigneeId !== payload.assigneeId) {
+    if (forceAssignee || currentAssigneeId !== payload.assigneeId) {
       // payload.assigneeId が null の場合は空文字を送って担当者をクリアする
       params.assigneeId = payload.assigneeId;
     }
@@ -1090,6 +1104,11 @@ async function main() {
   // 設定バリデーション（GitHub 必須 / Backlog は fetchBacklogIssues 内で検証）
   validateConfig(config);
   console.log('[Config] 環境変数の読み込み完了');
+  if (config.forceAssigneeSync) {
+    console.log(`[Config] FORCE_ASSIGNEE_SYNC: true`);
+    console.log(`[Config] FORCE_SYNC_ITEM_URL: ${config.forceSyncItemUrl}`);
+    console.log('[Config] ⚠ 上記 URL に一致する 1 件のみ assigneeId を強制再送します');
+  };
 
   // mapping.json の読み込み（projectId の値チェックも内部で実施）
   const mapping = await loadMapping();
@@ -1164,12 +1183,26 @@ async function main() {
   const toSkipNoDiff = [];                // { backlogIssue, payload }（照合一致・差分なし）
   let   duplicateWarnings = 0;
 
+  let forceAssigneeSyncMatched = false;
+
   for (const mappedItem of mappedItems) {
     const { issue: existing, hadDuplicate } = findExistingBacklogIssue(backlogIssues, mappedItem);
     if (hadDuplicate) duplicateWarnings++;
 
+    // FORCE_ASSIGNEE_SYNC: URL が一致する 1 件だけ assigneeId を強制再送する
+    const isForceAssigneeTarget =
+      config.forceAssigneeSync && mappedItem.githubUrl === config.forceSyncItemUrl;
+    if (isForceAssigneeTarget) {
+      forceAssigneeSyncMatched = true;
+      console.log(`[ForceAssignee] 対象: "${mappedItem.summary}"`);
+      console.log(`[ForceAssignee]   URL: ${mappedItem.githubUrl}`);
+      console.log(`[ForceAssignee]   assigneeId: ${mappedItem.assigneeId ?? '未設定（null）'}`);
+    }
+
     if (existing) {
-      const updateParams = buildBacklogUpdateParams(existing, mappedItem);
+      const updateParams = buildBacklogUpdateParams(
+        existing, mappedItem, { forceAssignee: isForceAssigneeTarget }
+      );
       if (updateParams === null) {
         toSkipNoDiff.push({ backlogIssue: existing, payload: mappedItem });
       } else {
@@ -1178,6 +1211,15 @@ async function main() {
     } else {
       toCreate.push(mappedItem);
     }
+  }
+
+  // FORCE_ASSIGNEE_SYNC 有効なのに URL が 1 件も一致しなかった場合は警告
+  if (config.forceAssigneeSync && !forceAssigneeSyncMatched) {
+    console.warn(
+      `[ForceAssignee] 警告: FORCE_SYNC_ITEM_URL に一致する GitHub アイテムが見つかりませんでした。\n` +
+      `  URL: ${config.forceSyncItemUrl}\n` +
+      `  GitHub Project の Issue URL が正しいか確認してください。`
+    );
   }
 
   const skipDraftCount  = draftItems.length;

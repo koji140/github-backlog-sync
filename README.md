@@ -157,6 +157,28 @@ LIMIT=1
 
 **用途:** 初回本番テスト時に 1 件だけ create / update して動作確認する。
 
+## 担当者の強制再同期（一時運用）
+
+GitHub 側を変更せずに Backlog の担当者だけを 1 件だけ再同期したい場合に使います。
+通常の差分判定をスキップして `assigneeId` を強制的に update に含めます。
+
+```
+# .env に追加
+FORCE_ASSIGNEE_SYNC=true
+FORCE_SYNC_ITEM_URL=https://github.com/<owner>/<repo>/issues/<n>
+```
+
+手順:
+1. `.env` に上記 2 行を追加する（URL は対象 GitHub Issue の URL）
+2. `npm run dry-run` で `[ForceAssignee]` ログが出て update 対象になることを確認
+3. 問題なければ `DRY_RUN=false` で `npm start` を実行
+4. **使用後は必ず両変数をコメントアウトまたは削除すること**
+
+制約:
+- 対象は URL が一致する **1 件のみ**（全件への影響なし）
+- `ASSIGNEE_UNMAPPED`（未マッピングユーザー）は force 時も送らない
+- `assigneeId` 以外のフィールドは通常の差分判定のまま
+
 ## DRY_RUN=false にする前に確認すべきこと
 
 | チェック項目 | 確認方法 |
