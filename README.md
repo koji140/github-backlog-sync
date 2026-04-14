@@ -218,9 +218,7 @@ DRY_RUN=false
 
 ### 残りの TODO
 
-- [ ] GitHub 側ページネーション ── GitHub Project が 100 件超の場合の対応
-- [ ] GitHub Secrets に API キーを登録し、Actions での自動実行を確認
-- [ ] エラーハンドリングとリトライロジックの追加（1 件失敗時の継続実行オプションなど）
+詳細は [同期レポート「残タスク / 今後の拡張」](docs/github-backlog-sync-report.md#残タスク--今後の拡張) を参照してください。
 
 ## 関連ドキュメント
 
