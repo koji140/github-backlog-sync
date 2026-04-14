@@ -4,9 +4,14 @@
   "description": "GitHub Projects → Backlog 片方向同期スクリプト",
   "type": "module",
   "scripts": {
-    "start": "node scripts/sync-github-project-to-backlog.js"
+    "start":     "node scripts/sync-github-project-to-backlog.js",
+    "dry-run":   "cross-env DRY_RUN=true node scripts/sync-github-project-to-backlog.js",
+    "self-test": "cross-env SELF_TEST=true node scripts/sync-github-project-to-backlog.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0"
   }
 }

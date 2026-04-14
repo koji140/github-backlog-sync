@@ -1,29 +1,73 @@
 {
-  "_comment": "このファイルをコピーして config/mapping.json として使用してください。",
+  "_readme": [
+    "このファイルをコピーして config/mapping.json として使用してください。",
+    "  cp config/mapping.example.json config/mapping.json",
+    "config/mapping.json は .gitignore に含まれているためコミットされません。",
+    "各 ID の調べ方は docs/mapping.md を参照してください。"
+  ],
 
+  "_section_statusMap": [
+    "GitHub Projects の Status フィールド値 → Backlog ステータス ID のマッピング。",
+    "Backlog ステータス ID は GET /api/v2/projects/:projectKey/statuses で確認できます。",
+    "マッピングにない GitHub Status は statusId=null として扱われ、Backlog 側は未設定のままになります。",
+    "キーは GitHub Projects 上で設定した Status の表示名と完全一致させてください（大文字小文字も区別）。"
+  ],
   "statusMap": {
-    "Todo": 1,
-    "Backlog": 1,
+    "Todo":        1,
+    "Backlog":     1,
     "In Progress": 2,
-    "In Review": 2,
-    "Done": 4,
-    "Closed": 4,
-    "Cancelled": 4
+    "In Review":   2,
+    "Done":        4,
+    "Closed":      4,
+    "Cancelled":   4
   },
 
+  "_section_assigneeMap": [
+    "GitHub ユーザー名 → Backlog ユーザー ID のマッピング。",
+    "Backlog ユーザー ID は GET /api/v2/users で確認できます。",
+    "マッピングにない GitHub ユーザーは担当者未設定として扱われ、ログに警告が出ます。",
+    "GitHub 側に複数担当者がいる場合は先頭 1 名だけを Backlog 担当者にマップします。"
+  ],
   "assigneeMap": {
     "github-username-1": 123456,
     "github-username-2": 234567
   },
 
+  "_section_issueTypeId": [
+    "Backlog の課題種別 ID。GET /api/v2/projects/:projectKey/issueTypes で確認できます。",
+    "すべての同期課題に同じ種別 ID が付きます。種別を分けたい場合は今後の拡張ポイントです。"
+  ],
   "issueTypeId": 1,
 
+  "_section_priorityId": [
+    "Backlog の優先度 ID。固定値を全課題に適用します。",
+    "1=最高, 2=高, 3=普通（デフォルト）, 4=低, 5=最低",
+    "GitHub Projects の Priority カスタムフィールドとのマッピングは今後の拡張ポイントです。"
+  ],
   "priorityId": 3,
 
-  "_notes": {
-    "statusMap": "値は Backlog のステータス ID。GET /api/v2/projects/:projectKey/statuses で確認。",
-    "assigneeMap": "キーは GitHub ユーザー名、値は Backlog ユーザー ID。GET /api/v2/users で確認。",
-    "issueTypeId": "Backlog の課題種別 ID。GET /api/v2/projects/:projectKey/issueTypes で確認。",
-    "priorityId": "1=最高, 2=高, 3=普通, 4=低, 5=最低"
+  "_section_projectId": [
+    "Backlog のプロジェクト ID（数値）。GET /api/v2/projects/:projectKey で確認できます。",
+    "課題作成時の必須パラメータです。必ず設定してください。"
+  ],
+  "projectId": 0,
+
+  "_section_syncMetadata": [
+    "sync metadata ブロックに関する設定です。通常は変更不要です。",
+    "Backlog 課題の description 末尾に以下の形式で付与されます:",
+    "",
+    "  ---",
+    "  <!-- github-backlog-sync -->",
+    "  GitHub Issue: <githubUrl>",
+    "  GitHub Project Item ID: <projectItemId>",
+    "  Last synced: <ISO8601 timestamp>",
+    "  <!-- /github-backlog-sync -->",
+    "",
+    "このブロックを検索することで、Backlog 課題と GitHub アイテムの対応を追跡します。",
+    "markerOpen / markerClose を変更した場合は既存課題の metadata も合わせて更新してください。"
+  ],
+  "syncMetadata": {
+    "markerOpen":  "<!-- github-backlog-sync -->",
+    "markerClose": "<!-- /github-backlog-sync -->"
   }
 }
