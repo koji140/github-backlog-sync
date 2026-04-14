@@ -1,0 +1,16 @@
+# 環境変数（機密情報を含む）
+.env
+
+# 本番用マッピング設定（機密情報を含む可能性あり）
+config/mapping.json
+
+# Node.js
+node_modules/
+
+# ログ
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db

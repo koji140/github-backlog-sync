@@ -1,0 +1,29 @@
+{
+  "_comment": "このファイルをコピーして config/mapping.json として使用してください。",
+
+  "statusMap": {
+    "Todo": 1,
+    "Backlog": 1,
+    "In Progress": 2,
+    "In Review": 2,
+    "Done": 4,
+    "Closed": 4,
+    "Cancelled": 4
+  },
+
+  "assigneeMap": {
+    "github-username-1": 123456,
+    "github-username-2": 234567
+  },
+
+  "issueTypeId": 1,
+
+  "priorityId": 3,
+
+  "_notes": {
+    "statusMap": "値は Backlog のステータス ID。GET /api/v2/projects/:projectKey/statuses で確認。",
+    "assigneeMap": "キーは GitHub ユーザー名、値は Backlog ユーザー ID。GET /api/v2/users で確認。",
+    "issueTypeId": "Backlog の課題種別 ID。GET /api/v2/projects/:projectKey/issueTypes で確認。",
+    "priorityId": "1=最高, 2=高, 3=普通, 4=低, 5=最低"
+  }
+}

@@ -1,0 +1,41 @@
+name: Sync GitHub Project to Backlog
+
+on:
+  # 手動実行
+  workflow_dispatch:
+
+  # 定期実行（スケジュール）
+  # ※ GitHub Actions の cron は UTC 基準で指定する（JST ではない）
+  #    JST = UTC+9 のため、JST 9:00 は UTC 0:00 に相当する
+  #    例: 平日 9:00 JST に実行したい場合 → UTC 0:00 → cron: '0 0 * * 1-5'
+  schedule:
+    - cron: '0 0 * * 1-5'  # UTC 0:00 = JST 9:00、月〜金
+
+jobs:
+  sync:
+    name: Sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run sync script
+        run: npm start
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_ORG: ${{ secrets.GH_ORG }}
+          GH_PROJECT_NUMBER: ${{ secrets.GH_PROJECT_NUMBER }}
+          BACKLOG_API_KEY: ${{ secrets.BACKLOG_API_KEY }}
+          BACKLOG_SPACE: ${{ secrets.BACKLOG_SPACE }}
+          BACKLOG_PROJECT_KEY: ${{ secrets.BACKLOG_PROJECT_KEY }}
