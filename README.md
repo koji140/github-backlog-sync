@@ -90,6 +90,7 @@ npm run dry-run
 | DRY_RUN ログ出力 | **動作** | 照合結果・create/update/skip 予定一覧・変更フィールド名を表示 |
 | Backlog 課題作成 | **動作** | `POST /api/v2/issues`（form-urlencoded） |
 | Backlog 課題更新 | **動作** | `PATCH /api/v2/issues/:id`（差分フィールドのみ送信） |
+| 担当者同期（assigneeMap） | **動作** | Owner フィールド → assigneeMap → Backlog assigneeId に変換。未マッピングは warn only |
 
 ## 差分判定の仕様
 
@@ -106,6 +107,18 @@ npm run dry-run
 **`Last synced:` は差分比較の対象外** のため、タイムスタンプの更新だけでは update されません。
 他のフィールドに差分があって Backlog を更新する場合は、description も一緒に送信して
 Last synced を自動的にリフレッシュします。
+
+**assigneeId の特殊値：**
+
+| 値 | 意味 | 挙動 |
+|----|------|------|
+| `number` | マッピング済み Backlog ユーザー ID | 差分があれば update |
+| `null` | GitHub 側に担当者なし（意図的な未設定） | Backlog 担当者をクリア |
+| `ASSIGNEE_UNMAPPED` | GitHub に担当者はいるが assigneeMap に未定義 | diff 対象外・Backlog 既存担当者を維持（warn only） |
+
+**Owner フィールドの取得について：**
+GitHub Project の "Owner" カスタムフィールドは `ProjectV2ItemFieldTextValue`（`text` プロパティ）の場合があります。
+スクリプトは `ownerField?.text ?? ownerField?.name` で両方に対応しています。
 
 ## create / update で送るパラメータの違い
 

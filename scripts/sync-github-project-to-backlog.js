@@ -402,6 +402,19 @@ function normalizeGitHubProjectItem(rawItem) {
 
   const statusField  = getField('Status');
   const dueDateField = getField('Due Date');
+  const ownerField   = getField('Owner');
+
+  // assigneeLogins の取得方針:
+  //   1. GitHub Issue の標準 Assignees フィールド（content.assignees.nodes.login）を優先
+  //   2. 標準 Assignees が空の場合、GitHub Project カスタムフィールド "Owner" の値を使う
+  //      （このプロジェクトでは担当者を "Owner" 単一選択フィールドで管理しているため）
+  const standardAssigneeLogins = (content.assignees?.nodes ?? []).map((n) => n.login);
+  // Owner フィールドの値は ProjectV2ItemFieldTextValue（text プロパティ）または
+  // ProjectV2ItemFieldSingleSelectValue（name プロパティ）のどちらかになりうる
+  const ownerValue = ownerField?.text ?? ownerField?.name ?? null;
+  const assigneeLogins = standardAssigneeLogins.length > 0
+    ? standardAssigneeLogins
+    : (ownerValue ? [ownerValue] : []);
 
   return {
     projectItemId:  rawItem.id,
@@ -411,7 +424,7 @@ function normalizeGitHubProjectItem(rawItem) {
     body:           content.body  ?? null,
     url:            content.url   ?? null,    // Draft にはない
     number:         content.number ?? null,   // Draft にはない
-    assigneeLogins: (content.assignees?.nodes ?? []).map((n) => n.login),
+    assigneeLogins,
     labelNames:     (content.labels?.nodes   ?? []).map((n) => n.name),
     statusName:     statusField?.name  ?? null,
     dueDate:        dueDateField?.date ?? null,

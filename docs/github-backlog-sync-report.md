@@ -19,8 +19,9 @@ GitHub Projectで管理しているタスクを、Backlog側にも同期し、
 * 差分がある場合のみ update
 * 差分がない場合は skip
 * dry-run による安全な事前確認
+* 担当者（Owner フィールド）も Backlog に反映済み
 
-### 最終状態
+### フェーズ1 完了時の状態（担当者同期前）
 
 ```
 create: 0
@@ -28,7 +29,14 @@ update: 0
 skip: 52
 ```
 
-👉 完全同期状態
+### 担当者同期完了後の最終状態（2026-04-15）
+
+```
+update: 50（Owner フィールド → Backlog assignee を全件反映）
+skip:    2（Owner 未設定または未マッピング）
+```
+
+👉 担当者まで含めた完全同期状態
 
 ---
 
@@ -157,6 +165,43 @@ sync metadata あり: 照合対象
 
 ---
 
+### ④ Owner フィールドの型（担当者同期フェーズ）
+
+問題：
+
+* `assigneeLogins` が空のまま → assigneeId が常に null
+* GitHub の標準 Assignees フィールドは使っておらず、カスタムフィールド "Owner" に値が入っていた
+* さらに "Owner" フィールドは `ProjectV2ItemFieldSingleSelectValue`（`name`）ではなく `ProjectV2ItemFieldTextValue`（`text`）だった
+
+対応：
+
+```js
+// name だけでは取れないケースがある
+const ownerValue = ownerField?.text ?? ownerField?.name ?? null;
+```
+
+また `content.assignees` が空の場合に "Owner" フィールドへフォールバックする実装を追加。
+
+👉 **フィールド型の違いは dry-run + デバッグログで特定した**
+
+---
+
+### ⑤ force assignee sync による 1 件検証
+
+問題：
+
+* Owner フィールド修正後、51 件が update 対象になった
+* いきなり全件は怖い
+
+対応：
+
+* `FORCE_ASSIGNEE_SYNC=true` + `FORCE_SYNC_ITEM_URL` で 1 件だけ先行確認
+* 1 件成功を確認してから全件実行
+
+👉 **段階確認の仕組みを先に作っておいたことが安全性につながった**
+
+---
+
 ## 6. 工夫したポイント
 
 ### ① 「完全一致」をゴールにした
@@ -242,7 +287,7 @@ skip: 全件
 
 ### 次
 
-* assignee 同期
+* ~~assignee 同期~~ → 完了（2026-04-15）
 * priority 同期
 
 ---
@@ -267,9 +312,11 @@ GitHubを上流、Backlogを運用基盤として、
 - [ ] GitHub 側ページネーション対応（100件以上対応）
 - [ ] GitHub Actions での定期実行（Secrets 設定含む）
 - [ ] エラーハンドリング（1件失敗時の継続 or 停止制御）
-- [x] assigneeMap 未定義ユーザーの扱い：運用ポリシー定義済み → [unmapped-assignee-policy.md](unmapped-assignee-policy.md)
-  - 暫定方針: warn only（警告ログのみ・Backlog 既存担当者を維持）
-  - 残作業: ①既知メンバーの assigneeMap 追加 ②warn only の完全実装（コード変更）
+- [x] assigneeMap 未定義ユーザーの扱い：完了 → [unmapped-assignee-policy.md](unmapped-assignee-policy.md)
+  - warn only 実装済み（ASSIGNEE_UNMAPPED センチネル）
+  - 大野 / 潮田 / 石丸 を assigneeMap に追加済み
+  - Owner フィールド（text 型）からの読み取りに対応
+  - force assignee sync で 1 件確認後、50 件 update 完了（2026-04-15）
 
 ### 優先度：中（運用安定・改善）
 - [ ] ログの構造化（JSON出力 or 保存）
