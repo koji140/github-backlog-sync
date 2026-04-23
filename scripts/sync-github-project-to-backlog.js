@@ -251,7 +251,7 @@ async function fetchGitHubProjectItems() {
             nodes {
               id
               type
-              fieldValues(first: 20) {
+              fieldValues(first: 100) {
                 nodes {
                   ... on ProjectV2ItemFieldTextValue {
                     text
@@ -386,6 +386,7 @@ async function fetchGitHubProjectItems() {
  *   assigneeLogins: string[],
  *   labelNames: string[],
  *   statusName: string|null,
+ *   startDate: string|null,
  *   dueDate: string|null,
  * }}
  */
@@ -400,9 +401,10 @@ function normalizeGitHubProjectItem(rawItem) {
       (n) => n?.field?.name?.toLowerCase() === fieldName.toLowerCase()
     );
 
-  const statusField  = getField('Status');
-  const dueDateField = getField('Due Date');
-  const ownerField   = getField('Owner');
+  const statusField    = getField('Status');
+  const startDateField = getField('Start date');
+  const dueDateField   = getField('Due Date');
+  const ownerField     = getField('Owner');
 
   // assigneeLogins の取得方針:
   //   1. GitHub Issue の標準 Assignees フィールド（content.assignees.nodes.login）を優先
@@ -426,8 +428,9 @@ function normalizeGitHubProjectItem(rawItem) {
     number:         content.number ?? null,   // Draft にはない
     assigneeLogins,
     labelNames:     (content.labels?.nodes   ?? []).map((n) => n.name),
-    statusName:     statusField?.name  ?? null,
-    dueDate:        dueDateField?.date ?? null,
+    statusName:     statusField?.name    ?? null,
+    startDate:      startDateField?.date ?? null,
+    dueDate:        dueDateField?.date   ?? null,
   };
 }
 
@@ -632,8 +635,8 @@ function runDescriptionNormalizationTests() {
   check('空文字 → 空文字',    normalizeDescriptionForComparison('')        === '');
 
   // Case 6: buildBacklogUpdateParams との統合 ─ Last synced のみ変化では null を返すこと
-  const backlogIssue = { summary: 'タイトル', description: c1a, assignee: null, dueDate: null, status: { id: 1 } };
-  const payload      = { summary: 'タイトル', description: c1b, assigneeId: null, dueDate: null, statusId: 1,
+  const backlogIssue = { summary: 'タイトル', description: c1a, assignee: null, startDate: null, dueDate: null, status: { id: 1 } };
+  const payload      = { summary: 'タイトル', description: c1b, assigneeId: null, startDate: null, dueDate: null, statusId: 1,
                          statusName: 'Todo', githubProjectItemId: ID, githubUrl: URL };
   const diffResult   = buildBacklogUpdateParams(backlogIssue, payload);
   check(
@@ -650,12 +653,227 @@ function runDescriptionNormalizationTests() {
     diffResult2 !== null && 'summary' in diffResult2 && 'description' in diffResult2
   );
 
+  // Case 8: startDate に差分あり → params に startDate が含まれること
+  const backlogIssue8 = { ...backlogIssue, startDate: null };
+  const payload8      = { ...payload, startDate: '2026-05-01' };
+  const diffResult8   = buildBacklogUpdateParams(backlogIssue8, payload8);
+  check(
+    'buildBacklogUpdateParams: startDate 差分あり → startDate が params に含まれる',
+    diffResult8 !== null && 'startDate' in diffResult8 && diffResult8.startDate === '2026-05-01'
+  );
+
+  // Case 9: startDate が一致 → params に startDate が含まれないこと
+  const backlogIssue9 = { ...backlogIssue, startDate: '2026-05-01T00:00:00Z' };
+  const payload9      = { ...payload, startDate: '2026-05-01' };
+  const diffResult9   = buildBacklogUpdateParams(backlogIssue9, payload9);
+  check(
+    'buildBacklogUpdateParams: startDate 一致（Backlog タイムスタンプ付き）→ startDate は params に含まれない',
+    diffResult9 === null || !('startDate' in diffResult9)
+  );
+
   console.log(`\n結果: ${passed} passed / ${failed} failed\n`);
   if (failed > 0) {
     console.error('自己確認テストに失敗しました。実装を確認してください。');
     process.exit(1);
   }
   console.log('すべてのテストが通過しました。');
+}
+
+// ---------------------------------------------------------------------------
+// A. 識別子の統一 / B. Backlog 向け表示変換
+// ---------------------------------------------------------------------------
+
+/**
+ * GitHub Issue title から [I-xx] 形式の識別子を抽出する
+ *
+ * 対応パターン: [英字+-数字] が先頭にある場合（例: [I-01], [TASK-3]）
+ *
+ * @param {string|null} title
+ * @returns {string|null} 識別子文字列（例: "I-01"）、なければ null
+ */
+function extractIdentifier(title) {
+  if (!title) return null;
+  const match = title.match(/^\[([A-Za-z]+-\d+)\]/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Backlog 用の summary を生成する（A-1）
+ *
+ * GitHub title に [I-xx] 形式の識別子が含まれていれば、そのまま summary として使う。
+ * 識別子がない場合はタイトルをそのまま使い、警告ログを出す。
+ * 二重付与はしない（識別子が既にあれば新たに付与しない）。
+ *
+ * このリポジトリが GitHub title を更新する責務は持たない。
+ * GitHub 側での [I-xx] 形式への統一は運用ルールとして docs/mapping.md に記載。
+ *
+ * @param {string|null} title - GitHub Issue の title
+ * @returns {string}
+ */
+function buildBacklogSummary(title) {
+  if (!title) return '(タイトルなし)';
+  if (/^\[[A-Za-z]+-\d+\]/.test(title)) {
+    return title; // 既に識別子がある → 二重付与せずそのまま使う
+  }
+  console.warn(
+    `[Identifier] 識別子なし: "${title}" ─ ` +
+    `GitHub Issue title を [I-xx] 形式に統一してください（docs/mapping.md 参照）。`
+  );
+  return title;
+}
+
+/**
+ * 内部パスを人間向け表示名に変換する（B-1）
+ *
+ * mapping.sourcePathMap に登録されている場合はその表示名を返す。
+ * 登録がない場合はパスをそのまま返す（フォールバック）。
+ *
+ * @param {string}        path          - 内部パス（例: "docs/phase2-tasklist.md"）
+ * @param {object|undefined} sourcePathMap - mapping.json の sourcePathMap
+ * @returns {string}
+ */
+function resolveDisplayName(path, sourcePathMap) {
+  if (!sourcePathMap || !path) return path ?? '';
+  return sourcePathMap[path] ?? path;
+}
+
+/**
+ * GitHub Issue の body から内部 docs パスを検出する（B-1 / buildSourceInfoBlock 用）
+ *
+ * 以下の形式に対応:
+ *   - Markdown リンク: [表示名](docs/xxx.md)
+ *   - プレーンテキスト: docs/xxx.md
+ *
+ * 複数ある場合は最初にヒットしたものを返す。
+ * ※ body 全体のパス置換は replaceSourcePathsInBody() が担当する。
+ *
+ * @param {string|null} body
+ * @returns {string|null} 検出されたパス、なければ null
+ */
+function extractSourcePath(body) {
+  if (!body) return null;
+  // Markdown リンク [xxx](docs/xxx.md) を優先
+  const mdLinkMatch = body.match(/\[[^\]]*\]\((docs\/[^)\s]+\.md)\)/);
+  if (mdLinkMatch) return mdLinkMatch[1];
+  // プレーンテキストの docs/xxx.md
+  const plainMatch = body.match(/\bdocs\/[\w./-]+\.md\b/);
+  if (plainMatch) return plainMatch[0];
+  return null;
+}
+
+/**
+ * body 本文中の内部 docs パスを表示名に置換する（B-1 本文置換）
+ *
+ * 安全設計: sourcePathMap に**登録済みのパスのみ**を置換する。
+ * 未登録パスはそのまま残す（意図しない置換・情報欠損の防止）。
+ *
+ * 対応する出現形式:
+ *   1. Markdown リンク  : [任意のテキスト](docs/xxx.md)
+ *      → [表示名](docs/xxx.md)  ※リンク構造は保持し、表示テキストのみ書き換える
+ *   2. プレーンテキスト : docs/xxx.md
+ *      → 表示名
+ *
+ * Markdown リンクを優先してスキャンし、残りのプレーンテキストを置換する。
+ *
+ * @param {string|null}      body          - GitHub Issue の body
+ * @param {object|undefined} sourcePathMap - mapping.json の sourcePathMap
+ * @returns {string} 置換後の body（変換なし／入力 null の場合は '' を返す）
+ */
+function replaceSourcePathsInBody(body, sourcePathMap) {
+  if (!body || !sourcePathMap || Object.keys(sourcePathMap).length === 0) {
+    return body ?? '';
+  }
+
+  let result = body;
+
+  for (const [path, displayName] of Object.entries(sourcePathMap)) {
+    // パスを正規表現でエスケープ（. / などのメタ文字を退避）
+    const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // 1. Markdown リンク [xxx](docs/xxx.md) → [表示名](docs/xxx.md)
+    //    リンク先 URL は保持（Backlog 内部管理用）、表示テキストのみ書き換える
+    result = result.replace(
+      new RegExp(`\\[([^\\]]*)\\]\\(${escapedPath}\\)`, 'g'),
+      `[${displayName}](${path})`
+    );
+
+    // 2. プレーンテキスト docs/xxx.md → 表示名
+    //    単語境界 \b でパス以外の文字列への誤ヒットを防ぐ
+    result = result.replace(
+      new RegExp(`\\b${escapedPath}\\b`, 'g'),
+      displayName
+    );
+  }
+
+  return result;
+}
+
+/**
+ * GitHub Issue の body から「元項目」テキストを検出する（B-2）
+ *
+ * デフォルトは "No.N タイトル" パターン。
+ * mapping.sourceItemPattern に正規表現文字列を設定すると差し替え可能。
+ *
+ * @param {string|null} body
+ * @param {string|undefined} customPattern - mapping.json の sourceItemPattern（正規表現文字列）
+ * @returns {string|null}
+ */
+function extractSourceItem(body, customPattern) {
+  if (!body) return null;
+  const pattern = customPattern ? new RegExp(customPattern) : /No\.\d+\s+[^\n]+/;
+  const match = body.match(pattern);
+  return match ? match[0].trim() : null;
+}
+
+/**
+ * Backlog description 冒頭に挿入する「同期元情報」ブロックを生成する（A-2 / B-2）
+ *
+ * 生成例:
+ *   ## 同期元情報
+ *
+ *   * 識別子: I-03
+ *   * 元チケット: フェーズ1KPTを整理する
+ *   * 元資料: フェーズ2タスク一覧
+ *   * 元項目: No.15 フェーズ1KPTを整理する
+ *
+ * - 識別子が取れない場合は「識別子」行を省略し、警告は buildBacklogSummary() が出す。
+ * - 元資料は sourcePathMap で変換した表示名を使う（内部パスはそのまま出さない）。
+ * - 識別子・元資料・元項目がすべて取得できない場合は null を返す（ブロック省略）。
+ *
+ * @param {object} normalizedItem - normalizeGitHubProjectItem() の返り値
+ * @param {object} mapping        - loadMapping() の返り値
+ * @returns {string|null}
+ */
+function buildSourceInfoBlock(normalizedItem, mapping) {
+  const title = normalizedItem.title ?? '';
+  const body  = normalizedItem.body  ?? '';
+
+  const sourcePathMap    = mapping.sourcePathMap    ?? {};
+  const sourceItemPattern = mapping.sourceItemPattern ?? undefined;
+
+  // 識別子を GitHub title から抽出
+  const identifier = extractIdentifier(title);
+
+  // 元チケット = 識別子を除いたタイトル（識別子なければタイトルそのまま）
+  const baseTitle = identifier ? title.replace(/^\[[^\]]+\]\s*/, '').trim() : title.trim();
+
+  // 元資料 = body から docs パスを検出して表示名に変換
+  const sourcePath    = extractSourcePath(body);
+  const sourceDisplay = sourcePath ? resolveDisplayName(sourcePath, sourcePathMap) : null;
+
+  // 元項目 = body から "No.N タイトル" などのパターンを検出
+  const sourceItem = extractSourceItem(body, sourceItemPattern);
+
+  // 識別子・元資料・元項目がすべてない場合はブロック省略
+  if (!identifier && !sourceDisplay && !sourceItem) return null;
+
+  const items = [];
+  if (identifier)    items.push(`* 識別子: ${identifier}`);
+  items.push(`* 元チケット: ${baseTitle}`);
+  if (sourceDisplay) items.push(`* 元資料: ${sourceDisplay}`);
+  if (sourceItem)    items.push(`* 元項目: ${sourceItem}`);
+
+  return `## 同期元情報\n\n${items.join('\n')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -675,6 +893,8 @@ function runDescriptionNormalizationTests() {
  *   assigneeId: number|null|typeof ASSIGNEE_UNMAPPED,
  *   issueTypeId: number|null,
  *   priorityId: number,
+ *   categoryId: number|null,
+ *   startDate: string|null,
  *   dueDate: string|null,
  *   statusId: number|null,
  *   statusName: string|null,
@@ -689,8 +909,8 @@ function runDescriptionNormalizationTests() {
  *                       → buildBacklogUpdateParams() で diff 対象外になる（warn only）
  */
 function mapGitHubItemToBacklogIssue(normalizedItem, mapping) {
-  // --- summary ---
-  const summary = normalizedItem.title ?? '(タイトルなし)';
+  // --- summary（A-1）: [I-xx] 識別子付きタイトル。既に識別子があれば二重付与しない ---
+  const summary = buildBacklogSummary(normalizedItem.title);
 
   // --- assigneeId ---
   // GitHub 側に複数担当者がいる場合は先頭 1 名のみを対象にする
@@ -728,12 +948,26 @@ function mapGitHubItemToBacklogIssue(normalizedItem, mapping) {
     }
   }
 
-  // --- description + sync metadata ---
-  const metadataBlock = buildSyncMetadataBlock(
-    normalizedItem,
-    mapping.syncMetadata
+  // --- description（A-2 / B-2）: 同期元情報ブロック + body + sync metadata ---
+  const metadataBlock   = buildSyncMetadataBlock(normalizedItem, mapping.syncMetadata);
+  const sourceInfoBlock = buildSourceInfoBlock(normalizedItem, mapping);
+
+  // description の組み立て:
+  //   1. 同期元情報ブロック（識別子・元チケット・元資料・元項目）
+  //   2. 区切り線（---）
+  //   3. GitHub Issue の body（本文中の docs パスも sourcePathMap で表示名に置換済み）
+  //   4. sync metadata ブロック（末尾）
+  // sourceInfoBlock が null の場合（識別子なし・元資料なし・元項目なし）は省略する。
+  // body 本文の docs パス置換: sourcePathMap 登録済みパスのみ置換（未登録パスはそのまま）。
+  const bodyParts = [];
+  if (sourceInfoBlock) bodyParts.push(sourceInfoBlock);
+  const rawBody = replaceSourcePathsInBody(
+    (normalizedItem.body ?? '').trim(),
+    mapping.sourcePathMap
   );
-  const description = appendSyncMetadata(normalizedItem.body, metadataBlock);
+  if (rawBody) bodyParts.push(rawBody);
+  const descriptionBase = bodyParts.join('\n\n---\n\n');
+  const description = appendSyncMetadata(descriptionBase || null, metadataBlock);
 
   return {
     summary,
@@ -741,6 +975,9 @@ function mapGitHubItemToBacklogIssue(normalizedItem, mapping) {
     assigneeId,
     issueTypeId:         mapping.issueTypeId ?? null,
     priorityId:          mapping.priorityId  ?? 3,
+    // categoryId: 0 または未設定の場合はカテゴリなし（null）として扱う
+    categoryId:          (mapping.categoryId > 0) ? mapping.categoryId : null,
+    startDate:           normalizedItem.startDate,
     dueDate:             normalizedItem.dueDate,
     statusId,
     // GitHub 側の情報（照合・ログ用）
@@ -839,6 +1076,8 @@ function normalizeDueDate(dateStr) {
  *   summary     : 文字列完全一致
  *   description : normalizeDescriptionForComparison() 後で比較（Last synced 行を除外）
  *   assigneeId  : backlogIssue.assignee?.id vs payload.assigneeId
+ *   categoryId  : backlogIssue.category[0]?.id vs payload.categoryId（先頭 1 件のみ）
+ *   startDate   : 日付部分 (YYYY-MM-DD) のみ比較
  *   dueDate     : 日付部分 (YYYY-MM-DD) のみ比較
  *   statusId    : backlogIssue.status?.id vs payload.statusId
  *
@@ -879,6 +1118,21 @@ function buildBacklogUpdateParams(backlogIssue, payload, { forceAssignee = false
     }
   }
 
+  // categoryId（payload が null / undefined / 0 の場合は変更しない。先頭 1 件のみ比較）
+  if (payload.categoryId > 0) {
+    const currentCategoryId = backlogIssue.category?.[0]?.id ?? null;
+    if (currentCategoryId !== payload.categoryId) {
+      params.categoryId = payload.categoryId;
+    }
+  }
+
+  // startDate（日付部分のみ比較）
+  const currentStartDate = normalizeDueDate(backlogIssue.startDate);
+  const newStartDate     = normalizeDueDate(payload.startDate);
+  if (currentStartDate !== newStartDate) {
+    params.startDate = payload.startDate; // null の場合は空文字に変換して送る（後述）
+  }
+
   // dueDate（日付部分のみ比較）
   const currentDueDate = normalizeDueDate(backlogIssue.dueDate);
   const newDueDate     = normalizeDueDate(payload.dueDate);
@@ -887,9 +1141,22 @@ function buildBacklogUpdateParams(backlogIssue, payload, { forceAssignee = false
   }
 
   // statusId（payload が null の場合は変更しない）
+  // last-modified wins: Backlog の updated > lastSynced の場合は GitHub で上書きしない
+  // （Backlog 側で手動変更された後は sync-backlog-to-github.js が GitHub へ反映する）
   const currentStatusId = backlogIssue.status?.id ?? null;
   if (payload.statusId !== null && currentStatusId !== payload.statusId) {
-    params.statusId = payload.statusId;
+    const meta         = extractSyncMetadata(backlogIssue.description);
+    const lastSynced   = meta?.lastSynced ? new Date(meta.lastSynced) : null;
+    const blUpdated    = backlogIssue.updated ? new Date(backlogIssue.updated) : null;
+    const backlogWins  = lastSynced && blUpdated && blUpdated > lastSynced;
+    if (backlogWins) {
+      console.log(
+        `[Status] スキップ（last-modified wins）: ${backlogIssue.issueKey}` +
+        ` Backlog更新 ${blUpdated.toISOString()} > lastSynced ${lastSynced.toISOString()}`
+      );
+    } else {
+      params.statusId = payload.statusId;
+    }
   }
 
   // description 以外のフィールドに差分があって Backlog を更新するなら、
@@ -981,6 +1248,8 @@ async function createBacklogIssue(payload, mapping, dryRun) {
     console.log(`  [DRY-RUN] CREATE: "${payload.summary}"`);
     console.log(`    status: ${payload.statusName ?? '未設定'}（create 時は送信しない。次回 update で同期）`);
     console.log(`    assigneeId: ${assigneeLog}`);
+    console.log(`    categoryId: ${payload.categoryId ?? '未設定'}`);
+    console.log(`    startDate: ${payload.startDate ?? '未設定'}`);
     console.log(`    dueDate: ${payload.dueDate ?? '未設定'}`);
     console.log(`    githubUrl: ${payload.githubUrl ?? '(なし)'}`);
     return null;
@@ -1004,7 +1273,16 @@ async function createBacklogIssue(payload, mapping, dryRun) {
   if (payload.assigneeId != null && payload.assigneeId !== ASSIGNEE_UNMAPPED) {
     params.set('assigneeId', String(payload.assigneeId));
   }
+  if (payload.startDate)           params.set('startDate',   payload.startDate);
   if (payload.dueDate)             params.set('dueDate',     payload.dueDate);
+
+  // categoryId[] はブラケットを URLSearchParams が %5B%5D にエンコードするため
+  // Backlog API が受け付けない。手動でリテラルの "categoryId[]" として連結する。
+  // （Backlog API は "category[]" ではなく "categoryId[]" を受け付ける）
+  const categoryPart = payload.categoryId
+    ? `&categoryId[]=${encodeURIComponent(payload.categoryId)}`
+    : '';
+  const bodyStr = params.toString() + categoryPart;
 
   const url = new URL(`https://${space}.backlog.com/api/v2/issues`);
   url.searchParams.set('apiKey', apiKey);
@@ -1014,7 +1292,7 @@ async function createBacklogIssue(payload, mapping, dryRun) {
     response = await fetch(url.toString(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString(),
+      body: bodyStr,
     });
   } catch (networkErr) {
     throw new Error(
@@ -1071,8 +1349,17 @@ async function updateBacklogIssue(backlogIssue, payload, updateParams, dryRun) {
     // null の場合は空文字で Backlog 側の担当者をクリアする
     params.set('assigneeId', updateParams.assigneeId != null ? String(updateParams.assigneeId) : '');
   }
-  if ('dueDate'  in updateParams) params.set('dueDate',  updateParams.dueDate ?? '');
-  if ('statusId' in updateParams) params.set('statusId', String(updateParams.statusId));
+  if ('startDate'  in updateParams) params.set('startDate', updateParams.startDate ?? '');
+  if ('dueDate'    in updateParams) params.set('dueDate',   updateParams.dueDate   ?? '');
+  if ('statusId'  in updateParams) params.set('statusId',  String(updateParams.statusId));
+
+  // categoryId[] はブラケットを URLSearchParams が %5B%5D にエンコードするため
+  // Backlog API が受け付けない。手動でリテラルの "categoryId[]" として連結する。
+  // （Backlog API は "category[]" ではなく "categoryId[]" を受け付ける）
+  const categoryPart = ('categoryId' in updateParams)
+    ? `&categoryId[]=${encodeURIComponent(updateParams.categoryId)}`
+    : '';
+  const bodyStr = params.toString() + categoryPart;
 
   const url = new URL(`https://${space}.backlog.com/api/v2/issues/${backlogIssue.id}`);
   url.searchParams.set('apiKey', apiKey);
@@ -1082,7 +1369,7 @@ async function updateBacklogIssue(backlogIssue, payload, updateParams, dryRun) {
     response = await fetch(url.toString(), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString(),
+      body: bodyStr,
     });
   } catch (networkErr) {
     throw new Error(
@@ -1172,6 +1459,28 @@ async function main() {
     mapGitHubItemToBacklogIssue(item, mapping)
   );
 
+  // DEBUG_DUE_DATE_SYNC: 1 件だけ詳細ログ（DEBUG_DUE_DATE_ITEM_URL で URL 指定、未指定時は dueDate ありの先頭）
+  let dueDateDebugIndex = -1;
+  if (process.env.DEBUG_DUE_DATE_SYNC === 'true') {
+    const filterUrl = (process.env.DEBUG_DUE_DATE_ITEM_URL || '').trim();
+    if (filterUrl) {
+      dueDateDebugIndex = targetItems.findIndex((t) => t.url === filterUrl);
+      if (dueDateDebugIndex < 0) {
+        console.warn(
+          `[DEBUG_DUE_DATE_SYNC] DEBUG_DUE_DATE_ITEM_URL に一致する Issue/PR がありません: ${filterUrl}`
+        );
+      }
+    } else {
+      dueDateDebugIndex = targetItems.findIndex((t) => t.dueDate != null);
+      if (dueDateDebugIndex < 0 && targetItems.length > 0) {
+        console.warn(
+          '[DEBUG_DUE_DATE_SYNC] Due Date が設定されているアイテムが 0 件のため、先頭 1 件でログします。'
+        );
+        dueDateDebugIndex = 0;
+      }
+    }
+  }
+
   // ----------------------------------------------------------
   // Step 4: Backlog の既存課題を全件取得
   // DRY_RUN=true 時も実行（照合に必要なため）
@@ -1198,7 +1507,8 @@ async function main() {
 
   let forceAssigneeSyncMatched = false;
 
-  for (const mappedItem of mappedItems) {
+  for (let i = 0; i < mappedItems.length; i++) {
+    const mappedItem = mappedItems[i];
     const { issue: existing, hadDuplicate } = findExistingBacklogIssue(backlogIssues, mappedItem);
     if (hadDuplicate) duplicateWarnings++;
 
@@ -1212,8 +1522,9 @@ async function main() {
       console.log(`[ForceAssignee]   assigneeId: ${mappedItem.assigneeId ?? '未設定（null）'}`);
     }
 
+    let updateParams = null;
     if (existing) {
-      const updateParams = buildBacklogUpdateParams(
+      updateParams = buildBacklogUpdateParams(
         existing, mappedItem, { forceAssignee: isForceAssigneeTarget }
       );
       if (updateParams === null) {
@@ -1223,6 +1534,52 @@ async function main() {
       }
     } else {
       toCreate.push(mappedItem);
+    }
+
+    // Due Date / Start date 調査: GraphQL → normalize → payload → 差分（buildBacklogUpdateParams）
+    if (dueDateDebugIndex === i) {
+      const normalizedItem = targetItems[i];
+      const rawItem = nonDraftItems[i];
+      const fieldNodes = rawItem.fieldValues?.nodes ?? [];
+      const startField = fieldNodes.find(
+        (n) => n?.field?.name?.toLowerCase() === 'start date'
+      );
+      const dueField = fieldNodes.find(
+        (n) => n?.field?.name?.toLowerCase() === 'due date'
+      );
+      console.log('\n[DEBUG_DUE_DATE_SYNC] --- 1 件のみ ---');
+      console.log('[DEBUG_DUE_DATE_SYNC] item URL:', normalizedItem.url ?? '(null)');
+      console.log('[DEBUG_DUE_DATE_SYNC] fieldValues 取得件数 (GraphQL):', fieldNodes.length);
+      console.log('[DEBUG_DUE_DATE_SYNC] getField("Start date") 生ノード:', JSON.stringify(startField ?? null));
+      console.log('[DEBUG_DUE_DATE_SYNC] getField("Due Date")   生ノード:', JSON.stringify(dueField ?? null));
+      console.log('[DEBUG_DUE_DATE_SYNC] normalizedItem.startDate:', normalizedItem.startDate);
+      console.log('[DEBUG_DUE_DATE_SYNC] normalizedItem.dueDate:  ', normalizedItem.dueDate);
+      console.log('[DEBUG_DUE_DATE_SYNC] payload.startDate:', mappedItem.startDate);
+      console.log('[DEBUG_DUE_DATE_SYNC] payload.dueDate:  ', mappedItem.dueDate);
+      if (existing) {
+        console.log('[DEBUG_DUE_DATE_SYNC] backlogIssue.startDate (API):', existing.startDate ?? '(null/undefined)');
+        console.log('[DEBUG_DUE_DATE_SYNC] backlogIssue.dueDate   (API):', existing.dueDate   ?? '(null/undefined)');
+        console.log(
+          '[DEBUG_DUE_DATE_SYNC] normalizeDueDate 比較 startDate:',
+          `Backlog="${normalizeDueDate(existing.startDate)}" vs GitHub="${normalizeDueDate(mappedItem.startDate)}"`
+        );
+        console.log(
+          '[DEBUG_DUE_DATE_SYNC] normalizeDueDate 比較 dueDate:  ',
+          `Backlog="${normalizeDueDate(existing.dueDate)}" vs GitHub="${normalizeDueDate(mappedItem.dueDate)}"`
+        );
+        console.log('[DEBUG_DUE_DATE_SYNC] buildBacklogUpdateParams 結果:', JSON.stringify(updateParams ?? null));
+        console.log(
+          '[DEBUG_DUE_DATE_SYNC] startDate が差分に含まれるか:', updateParams != null && 'startDate' in updateParams
+        );
+        console.log(
+          '[DEBUG_DUE_DATE_SYNC] dueDate   が差分に含まれるか:', updateParams != null && 'dueDate'    in updateParams
+        );
+      } else {
+        console.log(
+          '[DEBUG_DUE_DATE_SYNC] 照合なし（create 予定）。create 時: startDate 送信=', Boolean(mappedItem.startDate),
+          '/ dueDate 送信=', Boolean(mappedItem.dueDate)
+        );
+      }
     }
   }
 

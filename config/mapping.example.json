@@ -83,6 +83,31 @@
   ],
   "projectId": 0,
 
+  "_section_categoryId": [
+    "Backlog のカテゴリ ID（数値）。GET /api/v2/projects/:projectKey/categories で確認できます。",
+    "設定した ID のカテゴリが全同期課題に付与されます。",
+    "0 または未設定の場合はカテゴリを付与しません。"
+  ],
+  "categoryId": 0,
+
+  "_section_reverseStatusMap": [
+    "Backlog statusId → GitHub Status名 の上書きマップ（sync-backlog-to-github.js で使用）。",
+    "statusMap から自動逆引きされない Backlog statusId を追加するために使う。",
+    "",
+    "自動生成ルール（先着優先）:",
+    "  statusMap = { \"Todo\": 1, \"Backlog\": 1, \"In Progress\": 2 }",
+    "  → { 1: \"Todo\", 2: \"In Progress\" }（最初に現れた GitHub Status 名が採用される）",
+    "",
+    "このマップで上書き・追加できる例:",
+    "  Backlog statusId=3（処理済み）は statusMap に現れないため、ここで明示的に指定する。",
+    "  キーは Backlog statusId（数値を文字列で記載）、値は GitHub Projects の Status 表示名。",
+    "",
+    "Backlog デフォルトステータス: 1=未対応, 2=処理中, 3=処理済み, 4=完了"
+  ],
+  "reverseStatusMap": {
+    "3": "Done"
+  },
+
   "_section_syncMetadata": [
     "sync metadata ブロックに関する設定です。通常は変更不要です。",
     "Backlog 課題の description 末尾に以下の形式で付与されます:",
@@ -100,5 +125,44 @@
   "syncMetadata": {
     "markerOpen":  "<!-- github-backlog-sync -->",
     "markerClose": "<!-- /github-backlog-sync -->"
-  }
+  },
+
+  "_section_sourcePathMap": [
+    "内部パス（docs/xxx.md）→ Backlog 表示名 のマッピングです（B. Backlog 向け表示変換）。",
+    "",
+    "【適用範囲】登録済みパスは Backlog description の 2 箇所で変換されます:",
+    "  1. 冒頭の「同期元情報」ブロックの「元資料」フィールド",
+    "  2. GitHub Issue body 本文中に出現するパス（プレーンテキスト・Markdown リンク両対応）",
+    "",
+    "【安全設計】sourcePathMap に登録済みのパスのみ置換します。",
+    "  未登録パスはそのまま残るため、意図しない置換は発生しません。",
+    "",
+    "対応する GitHub Issue body のパターン:",
+    "  - Markdown リンク: [任意テキスト](docs/phase2-tasklist.md) → [フェーズ2タスク一覧](docs/phase2-tasklist.md)",
+    "  - プレーンテキスト: docs/phase2-tasklist.md → フェーズ2タスク一覧",
+    "",
+    "例（実際の値に書き換えてください）:",
+    "  \"docs/phase2-tasklist.md\"      → \"フェーズ2タスク一覧\"",
+    "  \"docs/phase2-retrospective.md\" → \"フェーズ2ふりかえり\"",
+    "",
+    "登録されていないパスはパスのまま表示されます（フォールバック）。",
+    "新しいドキュメントを追加した際はここにも追記してください。",
+    "詳細: docs/mapping.md の「内部パス → 表示名マッピング」セクションを参照。"
+  ],
+  "sourcePathMap": {
+    "docs/phase2-tasklist.md":      "フェーズ2タスク一覧",
+    "docs/phase2-retrospective.md": "フェーズ2ふりかえり",
+    "docs/phase1-kpt.md":           "フェーズ1KPT"
+  },
+
+  "_section_sourceItemPattern": [
+    "GitHub Issue body から「元項目」テキストを抽出する正規表現パターンです（省略可）。",
+    "",
+    "省略時のデフォルト: \"No\\.\\d+\\s+[^\\n]+\"",
+    "  → 「No.15 フェーズ1KPTを整理する」のようなパターンにマッチします。",
+    "",
+    "body のフォーマットに合わせて変更してください。",
+    "例: チェックリスト形式 \"- \\\\[.\\\\]\\\\s+.+\" など。",
+    "設定しない場合は、このキー自体を削除してください（デフォルトパターンが使われます）。"
+  ]
 }

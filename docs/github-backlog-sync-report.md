@@ -19,7 +19,9 @@ GitHub Projectで管理しているタスクを、Backlog側にも同期し、
 * 差分がある場合のみ update
 * 差分がない場合は skip
 * dry-run による安全な事前確認
-* 担当者（Owner フィールド）も Backlog に反映済み
+* 担当者（Owner フィールド）も Backlog に反映済み（2026-04-15）
+* **Start date（開始日）も Backlog に反映済み**（2026-04-15、update 46 件）
+* **Due Date（期限日）も Backlog に反映済み**（初期同期時に設定済み）
 
 ### フェーズ1 完了時の状態（担当者同期前）
 
@@ -306,6 +308,92 @@ GitHubを上流、Backlogを運用基盤として、
 
 ---
 
+## 11. Due Date 調査記録（2026-04-15）
+
+### 背景
+
+Due Date が Backlog に反映されていないように見えたため、取得経路を end-to-end で確認した。
+
+### 調査方法
+
+`DEBUG_DUE_DATE_SYNC=true` / `DRY_RUN=true` で実行し、issue #5 を対象に以下を確認。
+
+### 結果
+
+| 確認項目 | 結果 |
+|---------|------|
+| `fieldValues` 取得件数（GraphQL） | 10 件 |
+| `getField("Due Date")` 生ノード | `{ date: "2026-04-14", field: { name: "Due date" } }` |
+| `normalizedItem.dueDate` | `"2026-04-14"` |
+| `payload.dueDate` | `"2026-04-14"` |
+| `backlogIssue.dueDate`（API） | `"2026-04-14T00:00:00Z"` |
+| `normalizeDueDate` 比較 | Backlog `"2026-04-14"` vs GitHub `"2026-04-14"` → **一致** |
+| `buildBacklogUpdateParams` 結果 | `null`（差分なし → skip） |
+
+### 結論
+
+Due Date の取得・正規化・差分検出ロジックは **正常に動作している**。  
+「反映されていない」ように見えた原因は、**Backlog 側にすでに同じ期限が入っていたため update がスキップされた**ためであり、  
+動作不良ではなく正常な skip 挙動。
+
+### 対処済みの事項
+
+| 項目 | 変更内容 |
+|------|---------|
+| `fieldValues(first: 20)` の上限不足（予防的修正） | `first: 100` に拡大（フィールドが多い場合の切り捨て防止） |
+| `DEBUG_DUE_DATE_SYNC` / `DEBUG_DUE_DATE_ITEM_URL` | 1 件ごとの取得経路トレース機能を追加 |
+| `docs/mapping.md` | Due Date 実装済み・Start date 未実装を明記 |
+| `README.md` | 初期スコープに Due Date 追記・Start date を対象外に明記 |
+
+---
+
+## 12. Start date 同期実装（2026-04-15）
+
+### 変更内容
+
+Due Date の実装パターンをそのまま踏襲し、最小変更で対応した。
+
+| 変更箇所 | 内容 |
+|---------|------|
+| `normalizeGitHubProjectItem()` | `getField('Start date')` 追加、return に `startDate` 追加 |
+| `mapGitHubItemToBacklogIssue()` | `payload.startDate = normalizedItem.startDate` |
+| `buildBacklogUpdateParams()` | `normalizeDueDate()` を流用した日付比較を追加 |
+| `createBacklogIssue()` | `payload.startDate` があれば POST に追加 |
+| `updateBacklogIssue()` | `updateParams.startDate` があれば PATCH に追加 |
+| self-test | startDate の差分あり / なし の 2 ケースを追加（9 → 11 passed） |
+| `DEBUG_DUE_DATE_SYNC` | Start date の取得・比較結果も同時にログ出力するよう拡張 |
+
+### 注意事項
+
+- GitHub プロジェクトに `"Start date"` フィールドがない場合は `startDate: null` になる
+- `null` を PATCH すると Backlog の開始日をクリアする（空文字送信）
+- フィールド名は `getField` の大小文字無視照合で吸収されるため、`"Start Date"` も対応済み
+
+### 本番同期結果（2026-04-15）
+
+**Step 1: 1 件確認（LIMIT=1）**
+
+SUISHIN_DIV-48「フェーズ1実績指標を集計する」で 1 件先行確認。
+Backlog の開始日に `2026-04-08` が反映されたことを確認。description 崩れなし。
+
+**Step 2: 全件同期（LIMIT なし）**
+
+```
+create : 0
+update : 46
+skip   : 6
+Draft  : 0
+```
+
+46 件すべてに `startDate` が反映された。skip 6 件は GitHub 側も Backlog 側も開始日が未設定または一致のため正常 skip。
+
+**最終状態**
+
+GitHub Project の Start date・Due Date・担当者・ステータス・タイトル・説明の全フィールドが Backlog に同期済み。  
+`create: 0 / update: 0 / skip: 全件` の完全一致状態を再確認済み。
+
+---
+
 ## 残タスク / 今後の拡張
 
 ### 優先度：高（運用に入るために必要）
@@ -324,6 +412,7 @@ GitHubを上流、Backlogを運用基盤として、
 - [ ] dry-run 結果の保存（監査・比較用）
 
 ### 優先度：低（拡張）
+- [x] **Start date 同期**（GitHub 開始日 → Backlog `startDate`）：実装・全件本番同期完了（2026-04-15）
 - [ ] コメント同期（GitHub → Backlog）
 - [ ] 双方向同期（Backlog → GitHub）
 - [ ] UI（同期結果の可視化）
