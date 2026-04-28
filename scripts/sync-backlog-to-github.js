@@ -356,6 +356,11 @@ async function updateGitHubIssueAssignees(owner, repo, issueNumber, login) {
   }
 }
 
+function isValidGitHubLogin(login) {
+  if (!login) return false;
+  return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(login);
+}
+
 // ---------------------------------------------------------------------------
 // Backlog API: 課題一覧取得
 // ---------------------------------------------------------------------------
@@ -548,7 +553,12 @@ async function main() {
 
     if (targetGitHubLogin !== null) {
       const parsed = parseGitHubIssueUrl(githubUrl);
-      if (parsed) {
+      if (!isValidGitHubLogin(targetGitHubLogin)) {
+        console.warn(
+          `[Assignee] GitHub login として無効な値のため担当者同期をスキップ: ` +
+          `${issue.issueKey} → "${targetGitHubLogin}"`
+        );
+      } else if (parsed) {
         await updateGitHubIssueAssignees(parsed.owner, parsed.repo, parsed.number, targetGitHubLogin);
       } else {
         console.warn(`[Assignee] GitHub Issue URL が解析できません（Draft の可能性）: ${issue.issueKey} → 担当者同期をスキップ`);

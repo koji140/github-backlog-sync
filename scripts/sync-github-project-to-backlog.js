@@ -19,6 +19,9 @@
  *   [済] buildBacklogUpdateParams()   ... 差分チェック（Last synced を除く比較で変更フィールドのみ抽出）
  *   [済] createBacklogIssue()         ... Backlog 課題新規作成（POST /api/v2/issues）
  *   [済] updateBacklogIssue()         ... Backlog 課題更新（PATCH /api/v2/issues/:id）
+ *   [済] fetchGitHubParentIssue()     ... GitHub sub-issue の親Issue取得（REST）
+ *   [済] applyParentDateRanges()      ... 親Issueの日付を子Issueの最小Start/最大Dueに集約
+ *   [済] syncBacklogParentIssues()    ... GitHub 親子関係を Backlog parentIssueId に同期
  *   [TODO] GitHub 側ページネーション  ... 100 件超のプロジェクトへの対応
  *
  * 実行方法:
@@ -367,6 +370,155 @@ async function fetchGitHubProjectItems() {
   };
 }
 
+/**
+ * GitHub Issue の Web URL を owner/repo/issue number に分解する。
+ *
+ * @param {string|null|undefined} url - 例: https://github.com/owner/repo/issues/123
+ * @returns {{ owner: string, repo: string, number: number }|null}
+ */
+function parseGitHubIssueUrl(url) {
+  if (!url) return null;
+  const match = String(url).match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:[/?#].*)?$/);
+  if (!match) return null;
+  return {
+    owner:  match[1],
+    repo:   match[2],
+    number: Number(match[3]),
+  };
+}
+
+/**
+ * GitHub REST API で sub-issue の親Issueを取得する。
+ *
+ * 親がない Issue は 404 を返すため null として扱う。
+ *
+ * @param {object} normalizedItem - normalizeGitHubProjectItem() の返り値
+ * @returns {Promise<{ number: number, title: string, url: string }|null>}
+ */
+async function fetchGitHubParentIssue(normalizedItem) {
+  if (normalizedItem.contentType !== 'ISSUE') return null;
+
+  const parsed = parseGitHubIssueUrl(normalizedItem.url);
+  if (!parsed) return null;
+
+  const { token } = config.gh;
+  const endpoint =
+    `https://api.github.com/repos/${parsed.owner}/${parsed.repo}` +
+    `/issues/${parsed.number}/parent`;
+
+  const response = await fetch(endpoint, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'github-backlog-sync/0.1.0',
+    },
+  });
+
+  if (response.status === 404) return null;
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `[GitHub] 親Issue取得 API エラー: HTTP ${response.status} ${normalizedItem.url}\n` +
+      `レスポンス本文:\n${body}`
+    );
+  }
+
+  const parent = await response.json();
+  const parentNumber = Number(parent.number);
+  return {
+    number: parentNumber,
+    title:  parent.title ?? '',
+    url:    parent.html_url ?? `https://github.com/${parsed.owner}/${parsed.repo}/issues/${parentNumber}`,
+  };
+}
+
+/**
+ * normalize 済みアイテムに GitHub 親Issue情報を付与する。
+ *
+ * @param {Array<object>} normalizedItems
+ * @returns {Promise<Array<object>>}
+ */
+async function attachGitHubParentIssues(normalizedItems) {
+  console.log('[GitHub] 親Issue情報を取得中...');
+
+  let withParent = 0;
+  const result = [];
+
+  for (const item of normalizedItems) {
+    const parentIssue = await fetchGitHubParentIssue(item);
+    if (parentIssue) withParent++;
+    result.push({ ...item, parentIssue });
+  }
+
+  console.log(`[GitHub] 親Issueあり: ${withParent} 件 / ${normalizedItems.length} 件`);
+  return result;
+}
+
+/**
+ * 親Issueの Start/Due を子Issueの日付レンジから集計する。
+ *
+ * ルール:
+ *   - 親 startDate = 直接の子Issueの中で最も早い startDate
+ *   - 親 dueDate   = 直接の子Issueの中で最も遅い dueDate
+ *   - 親子関係を持つが子側に該当日付が 1 件もない場合は null にする
+ *   - 子を持たないIssueの日付は変更しない
+ *
+ * @param {Array<object>} normalizedItems
+ * @returns {Array<object>}
+ */
+function applyParentDateRanges(normalizedItems) {
+  const itemsByUrl = new Map(
+    normalizedItems
+      .filter((item) => item.url)
+      .map((item) => [item.url, item])
+  );
+  const childDatesByParentUrl = new Map();
+
+  for (const child of normalizedItems) {
+    const parentUrl = child.parentIssue?.url;
+    if (!parentUrl || !itemsByUrl.has(parentUrl)) continue;
+
+    const group = childDatesByParentUrl.get(parentUrl) ?? { startDates: [], dueDates: [] };
+    if (child.startDate) group.startDates.push(child.startDate);
+    if (child.dueDate)   group.dueDates.push(child.dueDate);
+    childDatesByParentUrl.set(parentUrl, group);
+  }
+
+  if (childDatesByParentUrl.size === 0) {
+    console.log('[DateRange] 子Issueから集計できる親Issue日付はありません');
+    return normalizedItems;
+  }
+
+  let changed = 0;
+  const result = normalizedItems.map((item) => {
+    if (!item.url || !childDatesByParentUrl.has(item.url)) return item;
+
+    const group = childDatesByParentUrl.get(item.url);
+    const startDate = group.startDates.length > 0
+      ? group.startDates.reduce((min, date) => date < min ? date : min)
+      : null;
+    const dueDate = group.dueDates.length > 0
+      ? group.dueDates.reduce((max, date) => date > max ? date : max)
+      : null;
+
+    if (item.startDate !== startDate || item.dueDate !== dueDate) {
+      changed++;
+      console.log(
+        `[DateRange] 親Issue日付を子Issueから集計: "${item.title}" ` +
+        `startDate ${item.startDate ?? '(なし)'} → ${startDate ?? '(なし)'}, ` +
+        `dueDate ${item.dueDate ?? '(なし)'} → ${dueDate ?? '(なし)'}`
+      );
+    }
+
+    return { ...item, startDate, dueDate };
+  });
+
+  console.log(`[DateRange] 親Issue日付集計: ${childDatesByParentUrl.size} 件（変更 ${changed} 件）`);
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // 中間形式への整形
 // ---------------------------------------------------------------------------
@@ -388,6 +540,7 @@ async function fetchGitHubProjectItems() {
  *   statusName: string|null,
  *   startDate: string|null,
  *   dueDate: string|null,
+ *   parentIssue: { number: number, title: string, url: string }|null,
  * }}
  */
 function normalizeGitHubProjectItem(rawItem) {
@@ -431,6 +584,7 @@ function normalizeGitHubProjectItem(rawItem) {
     statusName:     statusField?.name    ?? null,
     startDate:      startDateField?.date ?? null,
     dueDate:        dueDateField?.date   ?? null,
+    parentIssue:    null,
   };
 }
 
@@ -671,6 +825,33 @@ function runDescriptionNormalizationTests() {
     diffResult9 === null || !('startDate' in diffResult9)
   );
 
+  // Case 10: parentIssueId に差分あり → params に parentIssueId が含まれること
+  const parentDiff = buildBacklogParentUpdateParams({ parentIssueId: null }, 12345);
+  check(
+    'buildBacklogParentUpdateParams: parentIssueId 差分あり → parentIssueId が含まれる',
+    parentDiff !== null && parentDiff.parentIssueId === 12345
+  );
+
+  // Case 11: parentIssueId が一致 → null を返すこと
+  const parentNoDiff = buildBacklogParentUpdateParams({ parentIssueId: 12345 }, 12345);
+  check(
+    'buildBacklogParentUpdateParams: parentIssueId 一致 → null（skip）',
+    parentNoDiff === null
+  );
+
+  // Case 12: 親Issueの日付は直接の子Issueの最小Start/最大Dueに集計されること
+  const parentUrl = 'https://github.com/org/repo/issues/10';
+  const rangedItems = applyParentDateRanges([
+    { url: parentUrl, title: 'parent', startDate: '2026-05-10', dueDate: '2026-05-11', parentIssue: null },
+    { url: 'https://github.com/org/repo/issues/11', title: 'child-1', startDate: '2026-05-03', dueDate: '2026-05-20', parentIssue: { url: parentUrl } },
+    { url: 'https://github.com/org/repo/issues/12', title: 'child-2', startDate: '2026-05-01', dueDate: '2026-05-15', parentIssue: { url: parentUrl } },
+  ]);
+  const rangedParent = rangedItems.find((item) => item.url === parentUrl);
+  check(
+    'applyParentDateRanges: 親 startDate/dueDate は子の最小Start/最大Due',
+    rangedParent.startDate === '2026-05-01' && rangedParent.dueDate === '2026-05-20'
+  );
+
   console.log(`\n結果: ${passed} passed / ${failed} failed\n`);
   if (failed > 0) {
     console.error('自己確認テストに失敗しました。実装を確認してください。');
@@ -684,35 +865,35 @@ function runDescriptionNormalizationTests() {
 // ---------------------------------------------------------------------------
 
 /**
- * GitHub Issue title から [I-xx] 形式の識別子を抽出する
+ * GitHub Issue title から [I-xx] / [親I-xx] 形式の識別子を抽出する
  *
- * 対応パターン: [英字+-数字] が先頭にある場合（例: [I-01], [TASK-3]）
+ * 対応パターン: 先頭の角括弧内に I-数字 が含まれる場合（例: [I-01], [親I-55]）
  *
  * @param {string|null} title
- * @returns {string|null} 識別子文字列（例: "I-01"）、なければ null
+ * @returns {string|null} 識別子文字列（例: "I-01", "親I-55"）、なければ null
  */
 function extractIdentifier(title) {
   if (!title) return null;
-  const match = title.match(/^\[([A-Za-z]+-\d+)\]/);
+  const match = title.match(/^\[([^\]]*I-\d+)\]/);
   return match ? match[1] : null;
 }
 
 /**
  * Backlog 用の summary を生成する（A-1）
  *
- * GitHub title に [I-xx] 形式の識別子が含まれていれば、そのまま summary として使う。
+ * GitHub title に [I-xx] / [親I-xx] 形式の識別子が含まれていれば、そのまま summary として使う。
  * 識別子がない場合はタイトルをそのまま使い、警告ログを出す。
  * 二重付与はしない（識別子が既にあれば新たに付与しない）。
  *
  * このリポジトリが GitHub title を更新する責務は持たない。
- * GitHub 側での [I-xx] 形式への統一は運用ルールとして docs/mapping.md に記載。
+ * GitHub 側での [I-xx] / [親I-xx] 形式への統一は運用ルールとして docs/mapping.md に記載。
  *
  * @param {string|null} title - GitHub Issue の title
  * @returns {string}
  */
 function buildBacklogSummary(title) {
   if (!title) return '(タイトルなし)';
-  if (/^\[[A-Za-z]+-\d+\]/.test(title)) {
+  if (/^\[[^\]]*I-\d+\]/.test(title)) {
     return title; // 既に識別子がある → 二重付与せずそのまま使う
   }
   console.warn(
@@ -900,6 +1081,9 @@ function buildSourceInfoBlock(normalizedItem, mapping) {
  *   statusName: string|null,
  *   githubProjectItemId: string,
  *   githubUrl: string|null,
+ *   githubParentUrl: string|null,
+ *   githubParentNumber: number|null,
+ *   githubParentTitle: string|null,
  * }}
  *
  * assigneeId の値の意味:
@@ -984,6 +1168,9 @@ function mapGitHubItemToBacklogIssue(normalizedItem, mapping) {
     statusName:          normalizedItem.statusName,
     githubProjectItemId: normalizedItem.projectItemId,
     githubUrl:           normalizedItem.url,
+    githubParentUrl:     normalizedItem.parentIssue?.url    ?? null,
+    githubParentNumber:  normalizedItem.parentIssue?.number ?? null,
+    githubParentTitle:   normalizedItem.parentIssue?.title  ?? null,
   };
 }
 
@@ -1050,6 +1237,155 @@ function findExistingBacklogIssue(backlogIssues, mappedItem) {
   return { issue: candidates[0].issue, hadDuplicate: false };
 }
 
+/**
+ * Backlog 課題配列を GitHub Issue URL で引ける Map に変換する。
+ *
+ * @param {Array<object>} backlogIssues
+ * @returns {Map<string, object>}
+ */
+function buildBacklogIssueByGitHubUrl(backlogIssues) {
+  const byUrl = new Map();
+  for (const issue of backlogIssues) {
+    const meta = extractSyncMetadata(issue.description);
+    if (meta?.githubUrl) {
+      byUrl.set(meta.githubUrl, issue);
+    }
+  }
+  return byUrl;
+}
+
+/**
+ * Backlog 課題配列に作成・更新済み課題を反映する。
+ *
+ * @param {Array<object>} baseIssues
+ * @param {Array<object>} changedIssues
+ * @returns {Array<object>}
+ */
+function mergeBacklogIssueChanges(baseIssues, changedIssues) {
+  const byId = new Map(baseIssues.map((issue) => [issue.id, issue]));
+  for (const issue of changedIssues) {
+    if (issue?.id != null) byId.set(issue.id, issue);
+  }
+  return [...byId.values()];
+}
+
+/**
+ * Backlog の親課題ID差分だけを抽出する。
+ *
+ * @param {object} backlogIssue
+ * @param {number|null} parentIssueId
+ * @returns {{ parentIssueId: number|null }|null}
+ */
+function buildBacklogParentUpdateParams(backlogIssue, parentIssueId) {
+  const currentParentIssueId = backlogIssue.parentIssueId ?? backlogIssue.parentIssue?.id ?? null;
+  const newParentIssueId     = parentIssueId ?? null;
+  if (currentParentIssueId === newParentIssueId) return null;
+  return { parentIssueId: newParentIssueId };
+}
+
+/**
+ * GitHub 親子関係を Backlog parentIssueId に同期する。
+ *
+ * 通常フィールドの create/update が完了した後に実行することで、
+ * 同一回の同期で作成された親課題も子課題から参照できる。
+ *
+ * @param {object} params
+ * @param {Array<object>} params.mappedItems
+ * @param {Array<object>} params.backlogIssues
+ * @param {boolean} params.dryRun
+ * @returns {Promise<{ updated: number, skippedNoDiff: number, skippedMissingChild: number, skippedMissingParent: number }>}
+ */
+async function syncBacklogParentIssues({ mappedItems, backlogIssues, dryRun }) {
+  const backlogByUrl = buildBacklogIssueByGitHubUrl(backlogIssues);
+  const toUpdate = [];
+  let skippedNoDiff = 0;
+  let skippedMissingChild = 0;
+  let skippedMissingParent = 0;
+
+  for (const mappedItem of mappedItems) {
+    if (!mappedItem.githubUrl) continue;
+
+    const { issue: childBacklogIssue } = findExistingBacklogIssue(backlogIssues, mappedItem);
+    if (!childBacklogIssue) {
+      skippedMissingChild++;
+      continue;
+    }
+
+    let parentIssueId = null;
+
+    if (mappedItem.githubParentUrl) {
+      const parentBacklogIssue = backlogByUrl.get(mappedItem.githubParentUrl);
+      if (!parentBacklogIssue) {
+        skippedMissingParent++;
+        console.warn(
+          `[Parent] 親課題未照合: ${childBacklogIssue.issueKey} "${mappedItem.summary}" の親 ` +
+          `GitHub #${mappedItem.githubParentNumber ?? '?'} に対応する Backlog 課題が見つかりません。`
+        );
+        continue;
+      }
+      if (parentBacklogIssue.id === childBacklogIssue.id) {
+        skippedMissingParent++;
+        console.warn(
+          `[Parent] 親課題スキップ: ${childBacklogIssue.issueKey} "${mappedItem.summary}" は自分自身を親にできません。`
+        );
+        continue;
+      }
+      parentIssueId = parentBacklogIssue.id;
+    }
+
+    const updateParams = buildBacklogParentUpdateParams(childBacklogIssue, parentIssueId);
+    if (updateParams) {
+      toUpdate.push({ backlogIssue: childBacklogIssue, payload: mappedItem, updateParams });
+    } else {
+      skippedNoDiff++;
+    }
+  }
+
+  console.log('');
+  console.log('[ParentPlan] 親子関係同期予定:');
+  console.log(`  parentIssueId update : ${toUpdate.length} 件`);
+  console.log(`  skip（差分なし）     : ${skippedNoDiff} 件`);
+  console.log(`  skip（子課題未照合） : ${skippedMissingChild} 件`);
+  console.log(`  skip（親課題未照合） : ${skippedMissingParent} 件`);
+
+  if (toUpdate.length > 0) {
+    const previewCount = Math.min(toUpdate.length, 10);
+    console.log(`\n[ParentPlan] update 予定（先頭 ${previewCount} 件）:`);
+    toUpdate.slice(0, previewCount).forEach(({ backlogIssue, payload, updateParams }, i) => {
+      const parentLabel = updateParams.parentIssueId == null
+        ? '親なし'
+        : `parentIssueId=${updateParams.parentIssueId}`;
+      console.log(`  ${i + 1}. ${backlogIssue.issueKey}(id=${backlogIssue.id}) "${payload.summary}" → ${parentLabel}`);
+    });
+    if (toUpdate.length > previewCount) {
+      console.log(`  ... 他 ${toUpdate.length - previewCount} 件`);
+    }
+  }
+
+  if (dryRun) {
+    console.log('\n[DRY-RUN] Backlog 親子関係の書き込みはスキップします。');
+    return {
+      updated: toUpdate.length,
+      skippedNoDiff,
+      skippedMissingChild,
+      skippedMissingParent,
+    };
+  }
+
+  let updated = 0;
+  for (const { backlogIssue, payload, updateParams } of toUpdate) {
+    await updateBacklogIssue(backlogIssue, payload, updateParams, false);
+    updated++;
+  }
+
+  return {
+    updated,
+    skippedNoDiff,
+    skippedMissingChild,
+    skippedMissingParent,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Backlog API（REST）
 // ---------------------------------------------------------------------------
@@ -1080,6 +1416,7 @@ function normalizeDueDate(dateStr) {
  *   startDate   : 日付部分 (YYYY-MM-DD) のみ比較
  *   dueDate     : 日付部分 (YYYY-MM-DD) のみ比較
  *   statusId    : backlogIssue.status?.id vs payload.statusId
+ *   parentIssueId: backlogIssue.parentIssueId vs payload.parentIssueId
  *
  * description の比較で Last synced 行を除外することで、タイムスタンプの変化だけでは
  * 差分ありと判定されなくなる。
@@ -1156,6 +1493,16 @@ function buildBacklogUpdateParams(backlogIssue, payload, { forceAssignee = false
       );
     } else {
       params.statusId = payload.statusId;
+    }
+  }
+
+  // parentIssueId（payload に parentIssueId が明示されている場合のみ変更する）
+  // parentIssueId は GitHub 親子関係 → Backlog 親課題IDの解決後に後段で付与される。
+  if ('parentIssueId' in payload) {
+    const currentParentIssueId = backlogIssue.parentIssueId ?? backlogIssue.parentIssue?.id ?? null;
+    const newParentIssueId     = payload.parentIssueId ?? null;
+    if (currentParentIssueId !== newParentIssueId) {
+      params.parentIssueId = newParentIssueId;
     }
   }
 
@@ -1352,6 +1699,10 @@ async function updateBacklogIssue(backlogIssue, payload, updateParams, dryRun) {
   if ('startDate'  in updateParams) params.set('startDate', updateParams.startDate ?? '');
   if ('dueDate'    in updateParams) params.set('dueDate',   updateParams.dueDate   ?? '');
   if ('statusId'  in updateParams) params.set('statusId',  String(updateParams.statusId));
+  if ('parentIssueId' in updateParams) {
+    // null の場合は空文字で Backlog 側の親課題をクリアする
+    params.set('parentIssueId', updateParams.parentIssueId != null ? String(updateParams.parentIssueId) : '');
+  }
 
   // categoryId[] はブラケットを URLSearchParams が %5B%5D にエンコードするため
   // Backlog API が受け付けない。手動でリテラルの "categoryId[]" として連結する。
@@ -1433,7 +1784,9 @@ async function main() {
   // Step 2: Draft をスキップして中間形式へ normalize
   // ----------------------------------------------------------
   const nonDraftItems   = rawItems.filter((item) => item.type !== 'DRAFT_ISSUE');
-  const normalizedItems = nonDraftItems.map(normalizeGitHubProjectItem);
+  const normalizedItemsWithoutParents = nonDraftItems.map(normalizeGitHubProjectItem);
+  const normalizedItemsWithParents = await attachGitHubParentIssues(normalizedItemsWithoutParents);
+  const normalizedItems = applyParentDateRanges(normalizedItemsWithParents);
 
   console.log(`[Normalize] normalize 完了: ${normalizedItems.length} 件`);
 
@@ -1644,18 +1997,36 @@ async function main() {
   let updated = 0;
   const createdKeys = [];
   const updatedKeys = [];
+  const changedBacklogIssues = [];
 
   for (const payload of toCreate) {
     const result = await createBacklogIssue(payload, mapping, config.dryRun);
-    if (result) createdKeys.push(result.issueKey);
+    if (result) {
+      createdKeys.push(result.issueKey);
+      changedBacklogIssues.push(result);
+    }
     created++;
   }
 
   for (const { backlogIssue, payload, updateParams } of toUpdate) {
     const result = await updateBacklogIssue(backlogIssue, payload, updateParams, config.dryRun);
-    if (result) updatedKeys.push(result.issueKey);
+    if (result) {
+      updatedKeys.push(result.issueKey);
+      changedBacklogIssues.push(result);
+    }
     updated++;
   }
+
+  // ----------------------------------------------------------
+  // Step 7: GitHub 親子関係 → Backlog parentIssueId を同期
+  // create/update 後の最新課題情報を使う。DRY_RUN の場合は既存課題情報ベースで予定だけ出す。
+  // ----------------------------------------------------------
+  const latestBacklogIssues = mergeBacklogIssueChanges(backlogIssues, changedBacklogIssues);
+  const parentSyncResult = await syncBacklogParentIssues({
+    mappedItems,
+    backlogIssues: latestBacklogIssues,
+    dryRun: config.dryRun,
+  });
 
   // ----------------------------------------------------------
   // 最終サマリー
@@ -1679,8 +2050,16 @@ async function main() {
     const more    = updatedKeys.length > 5 ? ` ... 他 ${updatedKeys.length - 5} 件` : '';
     console.log(`    更新 issueKey     : ${preview}${more}`);
   }
+  console.log(`  Backlog parent更新  : ${parentSyncResult.updated} 件${config.dryRun ? '（DRY-RUN）' : ''}`);
   console.log(`  差分なしスキップ    : ${skipNoDiffCount} 件`);
+  console.log(`  親子差分なし        : ${parentSyncResult.skippedNoDiff} 件`);
   console.log(`  Draft スキップ      : ${skipDraftCount} 件`);
+  if (parentSyncResult.skippedMissingChild > 0 || parentSyncResult.skippedMissingParent > 0) {
+    console.log(
+      `  親子同期スキップ    : 子未照合 ${parentSyncResult.skippedMissingChild} 件 / ` +
+      `親未照合 ${parentSyncResult.skippedMissingParent} 件`
+    );
+  }
   if (duplicateWarnings > 0) {
     console.log(`  重複候補あり        : ${duplicateWarnings} 件（要確認）`);
   }
