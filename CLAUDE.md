@@ -50,7 +50,7 @@ GitHub Projects ↔ Backlog のステータス同期スクリプト群。
 
 ## 同期設計のポイント
 
-### last-modified wins（ステータス）
+### last-modified wins（ステータス・担当者）
 - `sync-github-project-to-backlog.js`: `backlogIssue.updated > lastSynced` なら GitHub の statusId で上書きしない
 - `sync-backlog-to-github.js`: `backlogIssue.updated - lastSynced > 5分` の場合のみ GitHub へ反映
 - 5分閾値の理由: 同期処理自体が Backlog の updated を lastSynced の数秒後に設定するため
@@ -59,6 +59,14 @@ GitHub Projects ↔ Backlog のステータス同期スクリプト群。
 - `statusMap`（GitHub Status名 → Backlog statusId）を自動逆引き（先着優先）
 - `mapping.json` の `reverseStatusMap` で追加・上書き可能
 - statusId=3（処理済み）は statusMap に現れないため reverseStatusMap で明示する
+
+### reverseAssigneeMap の生成
+- `assigneeMap`（GitHub login → Backlog userId）を自動逆引き（先着優先）
+- `mapping.json` の `reverseAssigneeMap` で上書き可能（通常は空で良い）
+- Backlog 担当者が null（未設定）の場合は GitHub 担当者をクリアしない（スキップ）
+- マッピングにない Backlog userId は `[Assignee]` 警告ログのみ出力してスキップ
+- 担当者更新は GitHub Issues REST API（`PATCH /repos/{owner}/{repo}/issues/{number}`）を使用
+  GitHub Issue URL は sync metadata の `GitHub Issue:` から取得・解析する
 
 ### DRY_RUN
 - 両スクリプトとも `DRY_RUN=true` で書き込みなしの確認が可能

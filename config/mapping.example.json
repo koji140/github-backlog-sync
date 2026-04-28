@@ -90,6 +90,21 @@
   ],
   "categoryId": 0,
 
+  "_section_reverseAssigneeMap": [
+    "Backlog userId → GitHub login の上書きマップ（sync-backlog-to-github.js で使用）。",
+    "assigneeMap（GitHub login → Backlog userId）から自動逆引きされる。",
+    "1つの Backlog userId が複数の GitHub login にマッピングされる場合など、",
+    "自動逆引きの結果を変えたい場合のみここで上書きする。",
+    "",
+    "自動生成ルール（先着優先）:",
+    "  assigneeMap = { \"user-a\": 111, \"user-b\": 222 }",
+    "  → { \"111\": \"user-a\", \"222\": \"user-b\" }",
+    "",
+    "Backlog 担当者が null（未設定）の場合は GitHub 担当者をクリアしない（スキップ）。",
+    "マッピングにない Backlog userId は警告ログのみ出力してスキップする。"
+  ],
+  "reverseAssigneeMap": {},
+
   "_section_reverseStatusMap": [
     "Backlog statusId → GitHub Status名 の上書きマップ（sync-backlog-to-github.js で使用）。",
     "statusMap から自動逆引きされない Backlog statusId を追加するために使う。",

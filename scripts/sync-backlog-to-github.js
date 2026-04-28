@@ -134,6 +134,23 @@ function buildReverseStatusMap(statusMap, reverseStatusMapOverride = {}) {
   return reverse;
 }
 
+// assigneeMap（GitHub login → Backlog userId）を自動逆引きして
+// reverseAssigneeMap（Backlog userId 文字列 → GitHub login）を生成する。
+// mapping.json の reverseAssigneeMap で上書き可能。
+function buildReverseAssigneeMap(assigneeMap, reverseAssigneeMapOverride = {}) {
+  const reverse = {};
+  for (const [githubLogin, backlogId] of Object.entries(assigneeMap ?? {})) {
+    const key = String(backlogId);
+    if (!(key in reverse)) {
+      reverse[key] = githubLogin;
+    }
+  }
+  for (const [backlogId, githubLogin] of Object.entries(reverseAssigneeMapOverride)) {
+    reverse[String(backlogId)] = githubLogin;
+  }
+  return reverse;
+}
+
 // ---------------------------------------------------------------------------
 // sync metadata 解析（sync-github-project-to-backlog.js と同一ロジック）
 // ---------------------------------------------------------------------------
@@ -306,6 +323,40 @@ async function updateGitHubProjectItemStatus(projectId, itemId, fieldId, optionI
 }
 
 // ---------------------------------------------------------------------------
+// GitHub Issues REST API: 担当者更新
+// ---------------------------------------------------------------------------
+
+function parseGitHubIssueUrl(url) {
+  if (!url) return null;
+  const match = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2], number: Number(match[3]) };
+}
+
+async function updateGitHubIssueAssignees(owner, repo, issueNumber, login) {
+  const { token } = config.gh;
+
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`,
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'github-backlog-sync/0.1.0',
+      },
+      body: JSON.stringify({ assignees: [login] }),
+    }
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`GitHub Issues API エラー: HTTP ${response.status}\n${body}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Backlog API: 課題一覧取得
 // ---------------------------------------------------------------------------
 
@@ -353,12 +404,18 @@ async function main() {
 
   validateConfig(config);
 
-  const mapping          = await loadMapping();
-  const reverseStatusMap = buildReverseStatusMap(mapping.statusMap, mapping.reverseStatusMap ?? {});
+  const mapping            = await loadMapping();
+  const reverseStatusMap   = buildReverseStatusMap(mapping.statusMap, mapping.reverseStatusMap ?? {});
+  const reverseAssigneeMap = buildReverseAssigneeMap(mapping.assigneeMap, mapping.reverseAssigneeMap ?? {});
 
   console.log('[Config] reverseStatusMap（statusMap から自動生成 + 上書き適用）:');
   for (const [backlogId, githubName] of Object.entries(reverseStatusMap)) {
     console.log(`  Backlog statusId ${backlogId} → GitHub "${githubName}"`);
+  }
+
+  console.log('[Config] reverseAssigneeMap（assigneeMap から自動生成 + 上書き適用）:');
+  for (const [backlogId, githubLogin] of Object.entries(reverseAssigneeMap)) {
+    console.log(`  Backlog userId ${backlogId} → GitHub "${githubLogin}"`);
   }
 
   // GitHub プロジェクト情報（projectId / fieldId / optionsByName）
@@ -383,7 +440,7 @@ async function main() {
 
   for (const issue of syncedIssues) {
     const meta = extractSyncMetadata(issue.description);
-    const { githubProjectItemId, lastSynced } = meta;
+    const { githubProjectItemId, githubUrl, lastSynced } = meta;
 
     // lastSynced が記録されていない課題は判定不能 → スキップ
     if (!lastSynced) {
@@ -425,11 +482,27 @@ async function main() {
       continue;
     }
 
+    // Backlog 担当者を GitHub login に逆引き
+    // null: Backlog 未設定 → GitHub 担当者はクリアしない（スキップ）
+    // ASSIGNEE_UNMAPPED 相当: マッピングなし → warn のみ・スキップ
+    const backlogAssigneeId = issue.assignee?.id ?? null;
+    let targetGitHubLogin = null;
+    let assigneeUnmapped  = false;
+    if (backlogAssigneeId !== null) {
+      targetGitHubLogin = reverseAssigneeMap[String(backlogAssigneeId)] ?? null;
+      if (targetGitHubLogin === null) {
+        assigneeUnmapped = true;
+      }
+    }
+
     toUpdate.push({
       issue,
       githubProjectItemId,
+      githubUrl,
       targetGitHubStatus,
       optionId,
+      targetGitHubLogin,
+      assigneeUnmapped,
       backlogUpdated: backlogUpdated.toISOString(),
       lastSynced,
     });
@@ -444,10 +517,15 @@ async function main() {
   if (toUpdate.length > 0) {
     const previewCount = Math.min(toUpdate.length, 10);
     console.log(`\n[Plan] update 予定（先頭 ${previewCount} 件）:`);
-    toUpdate.slice(0, previewCount).forEach(({ issue, targetGitHubStatus, backlogUpdated, lastSynced }, i) => {
+    toUpdate.slice(0, previewCount).forEach(({ issue, targetGitHubStatus, targetGitHubLogin, assigneeUnmapped, backlogUpdated, lastSynced }, i) => {
+      const assigneeInfo = targetGitHubLogin
+        ? ` / 担当: "${targetGitHubLogin}"`
+        : assigneeUnmapped
+          ? ' / 担当: マッピングなし（スキップ）'
+          : ' / 担当: Backlog未設定（スキップ）';
       console.log(
         `  ${i + 1}. ${issue.issueKey} "${issue.summary}"` +
-        ` → GitHub Status: "${targetGitHubStatus}"` +
+        ` → GitHub Status: "${targetGitHubStatus}"${assigneeInfo}` +
         ` (Backlog更新: ${backlogUpdated} > lastSynced: ${lastSynced})`
       );
     });
@@ -465,10 +543,23 @@ async function main() {
   console.log('\n[Sync] GitHub への書き込みを開始します:');
 
   let updated = 0;
-  for (const { issue, githubProjectItemId, targetGitHubStatus, optionId } of toUpdate) {
+  for (const { issue, githubProjectItemId, githubUrl, targetGitHubStatus, optionId, targetGitHubLogin, assigneeUnmapped } of toUpdate) {
     await updateGitHubProjectItemStatus(ghProjectId, githubProjectItemId, statusFieldId, optionId);
+
+    if (targetGitHubLogin !== null) {
+      const parsed = parseGitHubIssueUrl(githubUrl);
+      if (parsed) {
+        await updateGitHubIssueAssignees(parsed.owner, parsed.repo, parsed.number, targetGitHubLogin);
+      } else {
+        console.warn(`[Assignee] GitHub Issue URL が解析できません（Draft の可能性）: ${issue.issueKey} → 担当者同期をスキップ`);
+      }
+    } else if (assigneeUnmapped) {
+      console.warn(`[Assignee] reverseAssigneeMap に Backlog userId=${issue.assignee?.id} のマッピングなし: ${issue.issueKey} → 担当者同期をスキップ`);
+    }
+
+    const assigneeLog = targetGitHubLogin ? ` / 担当: "${targetGitHubLogin}"` : '';
     console.log(
-      `  [UPDATE] ${issue.issueKey} "${issue.summary}" → GitHub Status: "${targetGitHubStatus}"`
+      `  [UPDATE] ${issue.issueKey} "${issue.summary}" → GitHub Status: "${targetGitHubStatus}"${assigneeLog}`
     );
     updated++;
   }
